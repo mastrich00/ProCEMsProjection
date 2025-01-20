@@ -12,6 +12,46 @@ if not os.getenv("POLCO_PATH"):
     
 POLCO_PATH = os.getenv("POLCO_PATH")
 
+def as_fraction(number, approximation=None):
+    """
+    Takes integers or floats and converts them to rational strings.
+    
+    Parameters
+    ----------
+    number : int, float
+        Give number for conversion to a rational.
+    approximation : int default None
+        Sets the border for number a denominator can have.
+        If border of 1e12 is set, you get a rational unequal to zero for numbers down to 1e-12 and zero for numbers lower than that.
+        Approximation default is 1e6. Keep attention. Less strict approximation borders can lead to huge numbers which slow down the calculation intensely.
+    
+    Returns
+    -------
+    str
+        A rational or integer number as a string.
+    
+    Examples
+    --------
+    >>> into_fractions(5)
+    '5'
+    >>> into_fractions(0)
+    '0'
+    >>> into_fractions(0.5)
+    '1/2'
+    >>> into_fractions(1/6)
+    '1/6'
+    >>> into_fractions(1/6, approximation=1e20)
+    '6004799503160661/36028797018963968'
+    >>> into_fractions(1/1e6)
+    '1/1000000'
+    >>> into_fractions(1/1e7)
+    '0'
+    """
+    if approximation:    
+        return str(Fraction(number).limit_denominator(int(float(approximation))))
+    else:
+        return str(Fraction(number).limit_denominator())
+
 def doubleDescriptionINE(ineFile: str, outputDir: str, outputFile: str, stage = "", verbose=True, numThreads=28):
     '''
     - performs polco's double description method on the system specified by the two input matrices: 
@@ -27,7 +67,7 @@ def doubleDescriptionINE(ineFile: str, outputDir: str, outputFile: str, stage = 
     outputFilePath = os.path.join(outputDir, outputFile)
     logPath = outputDir + stage + "_polco.log"
 
-    cmd = ["java", "-Xms10g", "-Xmx400g", "-jar", POLCO_PATH, "-kind", "cdd", "-in", ineFile, "-out", "zip", outputFilePath, "-maxthreads", str(numThreads)]
+    cmd = ["java", "-Xms10g", "-Xmx15g", "-jar", POLCO_PATH, "-kind", "cdd", "-in", ineFile, "-out", "zip", outputFilePath, "-maxthreads", str(numThreads)]
 
     if verbose:
         print(cmd)
@@ -80,12 +120,12 @@ def doubleDescription(iqMatrix: np.matrix, iqFile: str, outputDir: str, outputFi
         
         logger.info("Equality Matrix:")
         logger.info(eqMatrix)
-        np.savetxt(eqFilePath, eqMatrix, fmt='%.8f', delimiter="\t") # TODO: fmt aendern
+        np.savetxt(eqFilePath, eqMatrix, fmt='%.6f', delimiter="\t") # TODO: fmt aendern
     
     iqFilePath = os.path.join(outputDir, iqFile)
     logger.info("Inequality Matrix:")
     logger.info(iqMatrix)
-    np.savetxt(iqFilePath, iqMatrix, fmt='%.8f', delimiter="\t")
+    np.savetxt(iqFilePath, iqMatrix, fmt='%.6f', delimiter="\t")
     
     if(".zip" not in outputFile):
         outputFile = outputFile + ".zip"
@@ -101,9 +141,9 @@ def doubleDescription(iqMatrix: np.matrix, iqFile: str, outputDir: str, outputFi
     # cmd.extend(["-out", "zip", outputFilePath])
     # cmd = ["java", "-jar", POLCO_PATH, "-kind", "text", "-iq", iqFilePath]
     if(eqFile != ""):
-        cmd = ["java", "-Xms10g", "-Xmx400g", "-jar", POLCO_PATH, "-kind", "text", "-eq", eqFilePath, "-iq", iqFilePath, "-out", "zip", outputFilePath, "-maxthreads", str(numThreads)]
+        cmd = ["java", "-Xms10g", "-Xmx13g", "-jar", POLCO_PATH, "-kind", "text", "-eq", eqFilePath, "-iq", iqFilePath, "-out", "zip", outputFilePath, "-maxthreads", str(numThreads)]
     else:
-        cmd = ["java", "-Xms10g", "-Xmx400g", "-jar", POLCO_PATH, "-kind", "text", "-iq", iqFilePath, "-out", "zip", outputFilePath, "-maxthreads", str(numThreads)]
+        cmd = ["java", "-Xms10g", "-Xmx13g", "-jar", POLCO_PATH, "-kind", "text", "-iq", iqFilePath, "-out", "zip", outputFilePath, "-maxthreads", str(numThreads)]
 
     
     if verbose:
@@ -168,7 +208,7 @@ def convertMatrixToHRepresentation(matrix: np.matrix, filePath: str):
                 if value == int(value): 
                     insertValue = int(value) 
                 else:
-                    insertValue = Fraction(float(value)).limit_denominator()
+                    insertValue = as_fraction(value)#Fraction(float(value)).limit_denominator()
                 line += str(insertValue)
             line += "\n"
             file.write(line)
@@ -203,7 +243,7 @@ def convertMatrixToVRepresentation(matrix: np.matrix, filePath: str):
                 if value == int(value): 
                     insertValue = int(value) 
                 else:
-                    insertValue = Fraction(float(value)).limit_denominator()
+                    insertValue = as_fraction(value)#Fraction(float(value)).limit_denominator()
                 line += str(insertValue)
             line += "\n"
             file.write(line)
@@ -489,7 +529,7 @@ def convertEqualitiesAndInequalities2hRep(eqMatrix: np.matrix, iqMatrix: np.matr
                 if value == int(value): 
                     insertValue = int(value) 
                 else:
-                    insertValue = Fraction(float(value)).limit_denominator()
+                    insertValue = as_fraction(value)#Fraction(float(value)).limit_denominator()
                 line += str(insertValue)
             line += "\n"
             file.write(line)
@@ -501,7 +541,7 @@ def convertEqualitiesAndInequalities2hRep(eqMatrix: np.matrix, iqMatrix: np.matr
                 if value == int(value): 
                     insertValue = int(value) 
                 else:
-                    insertValue = Fraction(float(value)).limit_denominator()
+                    insertValue = as_fraction(value)#Fraction(float(value)).limit_denominator()
                 line += str(insertValue)
             line += "\n"
             file.write(line)
@@ -514,7 +554,7 @@ def convertEqualitiesAndInequalities2hRep(eqMatrix: np.matrix, iqMatrix: np.matr
                 if value == int(value): 
                     insertValue = int(value) 
                 else:
-                    insertValue = Fraction(float(value)).limit_denominator()
+                    insertValue = as_fraction(value)#Fraction(float(value)).limit_denominator()
                 line += str(insertValue)
             line += "\n"
             file.write(line)
@@ -545,7 +585,7 @@ def convertEqualities2hRep(eqMatrix: np.matrix, hFilePath: str):
                 if value == int(value): 
                     insertValue = int(value) 
                 else:
-                    insertValue = Fraction(float(value)).limit_denominator()
+                    insertValue = as_fraction(value)#Fraction(float(value)).limit_denominator()
                 line += str(insertValue)
             line += "\n"
             file.write(line)
@@ -557,7 +597,7 @@ def convertEqualities2hRep(eqMatrix: np.matrix, hFilePath: str):
                 if value == int(value): 
                     insertValue = int(value) 
                 else:
-                    insertValue = Fraction(float(value)).limit_denominator()
+                    insertValue = as_fraction(value)#Fraction(float(value)).limit_denominator()
                 line += str(insertValue)
             line += "\n"
             file.write(line)

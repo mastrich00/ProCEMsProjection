@@ -115,7 +115,7 @@ def calculateEFPsFromProCEMs(proCEMs: np.matrix, verbose=True):
                         Z.remove(entry)
                 
         if len(Z) > 0:
-            print(supportProCEM)
+            logger.info(supportProCEM)
             efps.append([supportProCEM])
             
     return efps

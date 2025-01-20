@@ -80,27 +80,52 @@ def runMarashiWithMPLRSSubsets(stoicMatrix, projectOntoDimensions, outputDir, nu
     proCEMs = getRaysFromVrepresentation(vProjectedConeInePath)
     if verbose:
         print("\n#########\nResulting proCEMs:\n", proCEMs)
+        print("\n#########\nResulting proCEMs-Shape:\n", proCEMs.shape)
     efps = calculateEFPsFromProCEMs(proCEMs)
     printDatetime("Finished calculating efps:", datetime.now())
-    if verbose:
-        print("EFPs:", efps)
+    #if verbose:
+    #    print("EFPs:", efps)
     return proCEMs, efps
 
-def runMarashiWithPolcoSubsets(stoicMatrix, projectOntoDimensions, outputDir, numThreads=8, stopAfterProjection=True, verbose = True, iteration=0):
+def runMarashiWithPolcoSubsets(stoicMatrix, projectOntoDimensions, outputDir, numThreads=8, stopAfterProjection=True, verbose = True, iteration=0, originalProjectionReactions=[]):
     printDatetime("Start: ", datetime.now())
     #sortedStoicMatrix = sortStoicMatrix(stoicMatrix, projectOntoDimensions)
     sortedStoicMatrix = stoicMatrix
 
     convertMatrixToHRepresentation(sortedStoicMatrix, os.path.join(outputDir, "stoicMatrix.ine"))
     if iteration == 0:
-        eliminationMatrix = buildEliminationMatrix(sortedStoicMatrix, projectOntoDimensions) # build H
-        interestedMatrix = buildInterestedMatrix(sortedStoicMatrix, projectOntoDimensions) # build G
-        if verbose:
-            logger.info("InterestedMatrix:")
-            logger.info(interestedMatrix)
+        # eliminationMatrix = buildEliminationMatrix(sortedStoicMatrix, originalProjectionReactions) # build H
+        # interestedMatrix = buildInterestedMatrix(sortedStoicMatrix, originalProjectionReactions) # build G
+        p = len(originalProjectionReactions)
+        q = sortedStoicMatrix.shape[1] - p
+        convertEqualitiesAndInequalities2hRep(sortedStoicMatrix, 
+            np.hstack([
+                np.vstack([
+                    -np.identity(p),
+                    np.zeros((q,p))]),
+                np.vstack([
+                    np.zeros((p,q)),
+                    -np.identity(q)]),
+            ]),
+            os.path.join(outputDir, f"{iteration}_stoicMatrix.ine")
+        )
+        # convertEqualitiesAndInequalities2hRep(stoicMatrix[:,:len(originalProjectionReactions)], np.identity(stoicMatrix[:,:len(originalProjectionReactions)].shape[1]), os.path.join(outputDir, f"{iteration}_stoicMatrixInterested.ine"))
+        # redund(numThreads,mplrsPath, os.path.join(outputDir, f"{iteration}_stoicMatrixElimination.ine"),os.path.join(outputDir, f"{iteration}_redund_stoicMatrixElimination.ine"))
+        redund(numThreads,mplrsPath, os.path.join(outputDir, f"{iteration}_stoicMatrix.ine"),os.path.join(outputDir, f"{iteration}_stoicMatrix_redund.ine"))
+        sortedStoicMatrix = getMatrixFromHrepresentation(os.path.join(outputDir, f"{iteration}_stoicMatrix_redund.ine"))
+        # if verbose:
+        #     logger.info("InterestedMatrix:")
+        #     logger.info(interestedMatrix)
+        # colsElimination = eliminationMatrix.shape[1] - (sortedStoicMatrix.shape[1] - len(projectOntoDimensions))
+        # interestedMatrix = np.hstack([interestedMatrix, eliminationMatrix[:,:colsElimination]])
+        # eliminationMatrix = eliminationMatrix[:,colsElimination:]
+        interestedMatrix = sortedStoicMatrix[:,:len(projectOntoDimensions)]
+        eliminationMatrix = sortedStoicMatrix[:,len(projectOntoDimensions):]
     else:
         interestedMatrix = sortedStoicMatrix[:, :len(projectOntoDimensions)]
         eliminationMatrix = sortedStoicMatrix[:, len(projectOntoDimensions):]
+    print(f"shape el: {eliminationMatrix.shape}")
+    print(f"shape int: {interestedMatrix.shape}")
     #convertMatrixToHRepresentation(-eliminationMatrix.transpose(), os.path.join(outputDir, "tempRedundSort.ine"))
     #redund(numThreads,mplrsPath,os.path.join(outputDir, "tempRedundSort.ine"),os.path.join(outputDir, "outTempRedundSort.ine")) # remove redundancy
     #eliminationMatrix = getMatrixFromHrepresentation(os.path.join(outputDir, "outTempRedundSort.ine"))
@@ -177,13 +202,13 @@ def runMarashiWithPolcoSubsets(stoicMatrix, projectOntoDimensions, outputDir, nu
     # printDatetime("Finished redund step for proCEMs:", datetime.now())
     # proCEMs = getRaysFromVrepresentation(os.path.join(outputDir, "outRedundProCEMs_V.ine"))
     ## proCEMs= proCEMs.T
-    # if verbose:
-        # print("\n#########\nAfter redund - proCEMs:\n", proCEMs)
-        # print("Shape: ", proCEMs.shape)
+    if verbose:
+        print("\n#########\nAfter redund - proCEMs:\n", proCEMs)
+        print("Shape: ", proCEMs.shape)
     efps = calculateEFPsFromProCEMs(proCEMs)
     printDatetime("Finished calculating efps:", datetime.now())
     if verbose:
-        print("EFPs:", efps)
+        # print("EFPs:", efps)
         print("EFPs-length:", len(efps))
     return proCEMs, efps
 

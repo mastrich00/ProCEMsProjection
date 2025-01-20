@@ -203,22 +203,25 @@ def ex_metabolites_id_and_index(model, extern_compartments):
 def split_extern_reversible_reactions(model):
     """Splitting all reversible extern reactions of a cobrapy model into two cobrapy reaction objects."""
     for reaction in model.reactions:
-        if reaction.reversibility and reaction.exchange: # since splitted reactions are not reversible, they dont get splitted again
+        if reaction.reversibility:# and reaction.exchange: # since splitted reactions are not reversible, they dont get splitted again
             # create backward irreversible reaction from reversible reaction
             backward_reaction = cobra.Reaction(reaction.id + "_b")
             backward_reaction.name = reaction.name # reaction name is the same by purpose (remerging if name is the same)
             backward_reaction.subsystem = reaction.subsystem
-            backward_reaction.lower_bound = 0.  # make it irreversible
-            backward_reaction.exchange = True
+            backward_reaction.lower_bound = 0  # make it irreversible
+            if reaction.exchange:
+                backward_reaction.exchange = True
+            else:
+                backward_reaction.exchange = False
             if 'sbo' in reaction.annotation:
                 backward_reaction.annotation['sbo'] = reaction.annotation['sbo']
-            # add reaction to model
-            model.add_reactions([backward_reaction])
+
             # add metabolites to reaction
             metabolite_dict = reaction.metabolites
             for object in metabolite_dict:
                 backward_reaction.add_metabolites({object: (metabolite_dict[object] * -1)})
-
+            # add reaction to model
+            model.add_reactions([backward_reaction])
             # alter forward reaction to split
             reaction.id = reaction.id + "_f"
             #reaction.name = reaction.name
@@ -365,42 +368,6 @@ def write_project_line(ex_reactions, tmp_dir, core_name):
     file.write("\n")
     file.close()
 
-
-def mplrs_project(smatrix, ex_reactions, n_processes, path_mplrs, tmp_dir, core_name, rows=60, lastp=10, lastrows=10, verbose=True):
-    """Performs mplrs project on postredund.ine file."""
-    # calculate n times
-    # if we want the last H-representation
-    n = len(smatrix[0]) - len(ex_reactions)
-    
-    print(f'Start projection of postredund file.')
-    # mplrs project
-    cmd = ["mpirun", "-np", str(n_processes), path_mplrs, tmp_dir + core_name + "_postredund.ine", tmp_dir + core_name + "_h.projected", "-rows", str(rows),  "-lastp", str(lastp), "-lastrows", str(lastrows)]
-    for i in range(0, n):
-        print(f'Run {i + 1}/{n}')
-        if verbose:
-            subprocess.run(cmd)
-        else:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL)
-        os.replace(tmp_dir + core_name + "_h.projected", tmp_dir + core_name + "_postredund.ine")
-    os.replace(tmp_dir + core_name + "_postredund.ine", tmp_dir + core_name + "_h.projected")
-
-
-def mfel_project(mfel_file, n_processes, tmp_dir, core_name, rows=20, lastp=20, lastrows=5, verbose=True):
-    """Performs mplrs project on postredund.ine file with mfel.tcsh script. Its a modified fel script of the creators of mplrs."""
-    print(f'Start projection of postredund file.')
-    # give execute file permission
-    cmd = ["chmod", "+x", mfel_file]
-    subprocess.run(cmd)
-    
-    # run mfel file
-    # we need to run this with all first three positions, otherwise it wont work properly ($1, $2, $3 --> $# >= 3)
-    cmd = [mfel_file, tmp_dir + core_name + "_postredund.ine", tmp_dir + core_name + '_h.projected', str(n_processes), str(rows), str(lastp), str(lastrows)] # default cores are all
-    if verbose:
-        subprocess.run(cmd)
-    else:
-        subprocess.run(cmd, stdout=subprocess.DEVNULL)
-
-
 def mplrs_conversion(n_processes, path_mplrs, tmp_dir, core_name, verbose=True):
     """Convert H-representation to V-representation via mplrs."""
     cmd = ["mpirun", "-np", str(n_processes), path_mplrs, tmp_dir + core_name + "_h.projected", tmp_dir + core_name + ".projected"]
@@ -409,7 +376,6 @@ def mplrs_conversion(n_processes, path_mplrs, tmp_dir, core_name, verbose=True):
         subprocess.run(cmd)
     else:
         subprocess.run(cmd, stdout=subprocess.DEVNULL)
-
 
 def slice_stochio_matrix(smatrix, ex_reactions, ex_metabolites):
     """
@@ -427,8 +393,7 @@ def slice_stochio_matrix(smatrix, ex_reactions, ex_metabolites):
     smatrix = smatrix[metabolite_indices]
     # alternative: smatrix = smatrix[~np.all(smatrix == 0, axis=1)]
     return smatrix
-
-    
+   
 def merge_model(model):
     """Merges together splitted reactions from function split_extern_reversible_reactions in given cobrapy model and returns indices of reaction pairs to merge on pre-ECMs."""
     # create a "list" of the exchange reactions with new indices for after the projection
@@ -556,13 +521,13 @@ def count_queue_processing(count_queue, ECM_count, chunksize):
             count += add
         if count_queue.empty():
             if add == 0:
-                ti.sleep(3) # initial waiting time not depending on chunksize
+                time.sleep(3) # initial waiting time not depending on chunksize
             if chunksize <= 10000:
-                ti.sleep(1)
+                time.sleep(1)
             if chunksize > 10000 <= 100000:
-                ti.sleep(chunksize * 0.00014)
+                time.sleep(chunksize * 0.00014)
             if chunksize > 100000:
-                ti.sleep(chunksize * 0.0002)
+                time.sleep(chunksize * 0.0002)
             if count_queue.empty():
                 break
     # write total number of ECMs into mp.object
@@ -584,17 +549,17 @@ def ECM_queue_processing(ECM_queue, header, chunksize, outputfile):
                 np.savetxt(output_file, ECM, delimiter=separator, fmt=f'%1.{decimals}f')
             if ECM_queue.empty():
                 if add == 0:
-                    ti.sleep(3) # initial waiting time not depending on chunksize
+                    time.sleep(3) # initial waiting time not depending on chunksize
             if chunksize <= 10000:
-                ti.sleep(1)
+                time.sleep(1)
                 if ECM_queue.empty():
                     break
             if chunksize > 10000 <= 100000:
-                ti.sleep(chunksize * 0.00014)
+                time.sleep(chunksize * 0.00014)
                 if ECM_queue.empty():
                     break
             if chunksize > 100000:
-                ti.sleep(chunksize * 0.0002)
+                time.sleep(chunksize * 0.0002)
                 if ECM_queue.empty():
                     break
     output_file.close()
@@ -740,7 +705,6 @@ parser.add_argument('-lp', '--lastp',
 
 args = parser.parse_args()
 
-time_initial_setup_start = ti.time()
 
 # process id
 print(f'Process ID: {os.getpid()}')
@@ -846,42 +810,69 @@ write_reaction_direction(model)
 if not only_postprocessing:
     # create stochiometric matrix with splitted reactions
     smatrix = cobra.util.array.create_stoichiometric_matrix(model)
+    np.savetxt('matrix.csv', smatrix, delimiter=',', fmt='%d')
     # correct stochiometric matrix for backward reactions
     smatrix = correct_stochiometric_matrix(model, smatrix)
-
+    np.savetxt('matrix_out.csv', smatrix, delimiter=',', fmt='%d')
     ### create H- and V-representation
     # write H-representation to .ine file from cobra model
-    write_h_representation(smatrix, model, tmp_dir, core_name, approximation=approximation)
+    # write_h_representation(smatrix, model, tmp_dir, core_name, approximation=approximation)
 
     # perform mplrs redund on file; create .postredund file
-    redund(n_processes, path_mplrs, tmp_dir, core_name, verbose=verbose)
+    # redund(n_processes, path_mplrs, tmp_dir, core_name, verbose=verbose)
     # rewrite postredund file
-    rewrite_postredund_file(tmp_dir, core_name) # deletes last rows of .postredund files
+    # rewrite_postredund_file(tmp_dir, core_name) # deletes last rows of .postredund files
 
-
-
-from projection.enumeration import getMatrixFromHrepresentation
-
+# cobra.io.write_sbml_model(model, 'your_model.xml')
+# exit()
+from projection.enumeration import getMatrixFromHrepresentation, convertMatrixToVRepresentation, convertHtoVrepresentation, convertMatrixToHRepresentation, convertEqualities2hRep
+convertEqualities2hRep(smatrix, os.path.join(tmp_dir, core_name+".ine"))
+redund(n_processes, path_mplrs, tmp_dir, core_name, verbose=verbose)
 inpMatrix = getMatrixFromHrepresentation(os.path.join(tmp_dir, core_name+"_postredund.ine"))
+inpMatrix = smatrix
 
+from projection.projection import runMarashiWithPolco, runMarashiWithMPLRS, runFELWithPolco, runMarashiWithPolcoIterative, runMarashiWithPolcoSubsets
+for i, r in enumerate(model.reactions):
+    print(f"{i}: {r.id}")
 
-from projection.projection import runMarashiWithPolco, runMarashiWithMPLRS, runFELWithPolco, runMarashiWithPolcoIterative
-
+for i, r in enumerate(model.metabolites):
+    print(f"{i}: {r.id}")
 
 polcoPath = "polco.jar"
 mplrsPath = "mplrsV7_2"
 
-inpReactions = [item[1] for item in ex_reactions]
-lenOriginalReactions = len(inpReactions)
-remaining_reactions = [i for i in range(inpMatrix.shape[1]) if i not in inpReactions]
-reactions = inpReactions + remaining_reactions
+reactions = [item[1] for item in ex_reactions]
+print(f"InputReactions: {reactions}")
+# exit()
+originalReactions = reactions
+lenOriginalReactions = len(reactions)
+remaining_reactions = [i for i in range(inpMatrix.shape[1]) if i not in reactions]
+reactions = reactions + remaining_reactions
 inpMatrix = inpMatrix[:, reactions]
-
-
-print(f"InputReactions: {inpReactions}")
+print(reactions)
+lenCurrentReactions = len(reactions)
+stepSize = 5
+iteration = 0
+while lenCurrentReactions - stepSize > lenOriginalReactions:
+    print(f"Iter: {lenCurrentReactions}")
+    lenCurrentReactions -= stepSize
+    if lenCurrentReactions < lenOriginalReactions:
+        break
+    tempFolder = f"testResults/polco_ecoli_cmayer_jupyter/iter_{iteration}/"
+    if not os.path.exists(tempFolder):
+        os.makedirs(tempFolder)
+    inpMatrix, efps = runMarashiWithPolcoSubsets(inpMatrix, reactions[:lenCurrentReactions], tempFolder, 4, True, True, iteration=iteration,originalProjectionReactions=originalReactions)
+    #inpMatrix = -inpMatrix
+    iteration += 1
+    # exit()
+#exit(0)
+tempFolder = f"testResults/polco_ecoli_cmayer_jupyter/iter_{iteration}/"
+if not os.path.exists(tempFolder):
+    os.makedirs(tempFolder)
+proCEMs, efps = runMarashiWithPolcoSubsets(inpMatrix, reactions[:lenOriginalReactions], tempFolder, 4, False, True, iteration=iteration,originalProjectionReactions=originalReactions)
 
 #proCEMs, efps = runMarashiWithPolcoIterative(inpMatrix, inpReactions, "testResults/polco_iterative_ecoli_cmayer_jupyter/", 100, False, True)
-proCEMs, efps = runMarashiWithPolco(inpMatrix, inpReactions, "testResults/polco_ecoli_cmayer_jupyter/", 100, False, True)
+#proCEMs, efps = runMarashiWithPolco(inpMatrix, inpReactions, "testResults/polco_ecoli_cmayer_jupyter/", 100, False, True)
 #proCEMs, efps = runMarashiWithMPLRS(inpMatrix, inpReactions, "testResults/mplrs_ecoli_cmayer_jupyter/", mplrsPath, 100, False, True)
 # proCEMs, efps = runFELWithPolco(inpMatrix, inpDims, "~/secondDraft/testResults/fel/", mplrsPath)
 logger.info(f"proCEMS: {len(proCEMs)}")
