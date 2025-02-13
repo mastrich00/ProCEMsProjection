@@ -1,7 +1,45 @@
 import numpy as np
 import copy
 from projection.logging_config import logger
+import datetime
+def logTimeToCSV(filepath, step, substep, time, date=None):
+    if not date:
+        date = datetime.datetime.now()
+    with open(filepath, "a") as file:
+        file.write(f"{step},{substep},{time},{str(date)}\n")
 
+def get_sorted_column_indices_from_array(arr, lenOriginalReactions):
+    """
+    Given a 2D numpy array, ignores the first 24 columns and returns a list of 
+    original column indices (of the remaining columns) ordered by descending sum 
+    of the absolute values of their entries.
+
+    Parameters:
+        arr (np.array): A 2D numpy array.
+
+    Returns:
+        List[int]: Sorted original column indices (ignoring the first 24 columns) 
+                ordered by descending sum of absolute values.
+    """
+    # Verify that the array has more than 24 columns.
+    if arr.shape[1] <= lenOriginalReactions:
+        raise ValueError(f"The array must have more than {lenOriginalReactions} columns.")
+    
+    # Select columns after the first 24.
+    remaining_columns = arr[:, lenOriginalReactions:]
+    
+    # Compute the sum of absolute values for each of the remaining columns.
+    abs_sums = np.sum(np.abs(remaining_columns), axis=0)
+    
+    # Get the indices that would sort these sums in descending order.
+    # np.argsort sorts in ascending order by default, so we sort the negative values to reverse the order.
+    sorted_order = np.argsort(-abs_sums)
+    
+    # Adjust the indices to match the original array by adding the offset (24).
+    original_indices = sorted_order + lenOriginalReactions
+    
+    return original_indices.tolist()
+        
 def sortStoicMatrix(stoicMatrix: np.matrix, reactions: list, verbose=True):
     '''
     sorts the stoichometric matrix so that the columns specified with indices in ${reactions} are the first columns
@@ -91,20 +129,19 @@ def getSupport(vector):
 def calculateEFPsFromProCEMs(proCEMs: np.matrix, verbose=True):
     '''
     calculates the EFPs from the ProCEMs according to Marashi paper
-    (not really tested/verified by me yet)
     '''
     # print(proCEMs)
     efps = []
-    for colIndex in range(proCEMs.shape[1]):
-        proCEM = proCEMs[:,colIndex]
-        # print(f"{colIndex}: {proCEM}")
+    for rowIndex in range(proCEMs.shape[0]):
+        proCEM = proCEMs[rowIndex,:]
+        # print(f"{rowIndex}: {proCEM}")
         supportProCEM = getSupport(proCEM)
         # print(supportProCEM)
         Z = copy.deepcopy(supportProCEM)
-        for compareColIndex in range(proCEMs.shape[1]):
-            if compareColIndex == colIndex:
+        for compareRowIndex in range(proCEMs.shape[0]):
+            if compareRowIndex == rowIndex:
                 continue
-            compareProCEM = proCEMs[:,compareColIndex]
+            compareProCEM = proCEMs[compareRowIndex,:]
             compareSupport = getSupport(compareProCEM)
             # print(Z)
             # print(compareSupport)
@@ -117,5 +154,5 @@ def calculateEFPsFromProCEMs(proCEMs: np.matrix, verbose=True):
         if len(Z) > 0:
             logger.info(supportProCEM)
             efps.append([supportProCEM])
-            
+      
     return efps

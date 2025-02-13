@@ -42,18 +42,18 @@ while lenCurrentReactions - stepSize > lenOriginalReactions:
     tempFolder = f"testResults/polco_iterative_small/iter_{iteration}/"
     if not os.path.exists(tempFolder):
         os.makedirs(tempFolder)
-    inpMatrix, efps = runMarashiWithMPLRSSubsets(inpMatrix, reactions[:lenCurrentReactions], tempFolder, 4, True, True, iteration=iteration)
+    inpMatrix, efps = runMarashiWithMPLRSSubsets(inpMatrix, reactions[:lenCurrentReactions], tempFolder, 100, True, True, iteration=iteration)
     #inpMatrix = -inpMatrix
     iteration += 1
 #exit(0)
 tempFolder = f"testResults/polco_iterative_small/iter_{iteration}/"
 if not os.path.exists(tempFolder):
     os.makedirs(tempFolder)
-proCEMs, efps = runMarashiWithMPLRSSubsets(inpMatrix, reactions[:lenOriginalReactions], tempFolder, 4, False, True, iteration=iteration)
+proCEMs, efps = runMarashiWithMPLRSSubsets(inpMatrix, reactions[:lenOriginalReactions], tempFolder, 100, False, True, iteration=iteration)
 #proCEMs, efps = runMarashiWithPolcoSubsets(inpMatrix, reactions[:lenOriginalReactions], tempFolder, 4, False, True, iteration=iteration)
 #proCEMs, efps = runMarashiWithPolcoIterative(inpMatrix, originalReactions, "testResults/polco_iterative_small/", 100, False, True)
 # proCEMs, efps = runMarashiWithPolco(inpMatrix, originalReactions, "testResults/polco_small/", 4, False, True)
 #proCEMs, efps = runMarashiWithMPLRS(inpMatrix, reactions, "testResults/mplrs/", mplrsPath, 20, False, True)
 # proCEMs, efps = runFELWithPolco(inpMatrix, inpDims, "~/secondDraft/testResults/fel/", mplrsPath)
-logger.info(f"proCEMS: {len(proCEMs)}")
-logger.info(f"efps: {len(efps)}")
+print(f"proCEMS: {len(proCEMs)}")
+print(f"efps: {len(efps)}")

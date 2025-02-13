@@ -1,9 +1,5 @@
-
-"""
-Python script to calculate ECM's from given metabolic model. Reads in metabolic model in xml format and creates list of all ECMs as csv file in default settings. If you also want intermediate result for development, set developer flag. See help page (-h) for further information.
-
-@author: Christian Mayer, Marcus Holzer
-"""
+polcoPath = "../secondDraft/polco.jar"
+mplrsPath = "mplrsV7_2"
 
 ### import statements ###    
 import argparse
@@ -23,10 +19,14 @@ import multiprocessing as mp
 from itertools import islice
 import gzip
 from functools import partial
+import time
+from projection.enumeration import getMatrixFromHrepresentation, convertMatrixToVRepresentation, convertHtoVrepresentation, convertMatrixToHRepresentation, convertEqualities2hRep, as_fraction
+from projection.marashiProjectionHelpers import get_sorted_column_indices_from_array, logTimeToCSV
+from projection.projection import runMarashiWithPolco, runMarashiWithMPLRS, runFELWithPolco, runMarashiWithPolcoIterative, runMarashiWithPolcoSubsets, runMarashiWithMPLRSSubsets
 
 
 ### functions ###
-
+    
 def read_model(input_filename):
     """
     Reads metabolic model from sbml file using the 'cobra.io.read_sbml_model' functions. Reads io string during reading
@@ -155,14 +155,33 @@ def write_reaction_direction(model):
         else:
             reaction.direction = False
             print(f'Reaction {reaction.id} has no feasible boundaries!')
+    return model
 
 
-def correct_stochiometric_matrix(model, smatrix):
-    """Changes algebraic sign of each column in stochiometric matrix with backward reaction."""
-    for i, reaction in enumerate(model.reactions):
+# def correct_stochiometric_matrix(model, smatrix):
+#     """Changes algebraic sign of each column in stochiometric matrix with backward reaction."""
+#     for i, reaction in enumerate(model.reactions):
+#         if reaction.direction == "backward":
+#             smatrix[:,i] = smatrix[:,i] * -1
+#     return smatrix
+
+def correct_stochiometric_matrix(model):
+    """
+    For each reaction in the model with direction "backward",
+    flip the sign of all its stoichiometric coefficients.
+    
+    This function directly updates the reactions in the model.
+    """
+    for reaction in model.reactions:
         if reaction.direction == "backward":
-            smatrix[:,i] = smatrix[:,i] * -1
-    return smatrix
+            # Create a copy of the current stoichiometry.
+            # reaction.metabolites is a dict: {metabolite: coefficient, ...}
+            current_stoich = reaction.metabolites.copy()
+            # For each metabolite, add an offset of -2 * coefficient.
+            # This works because:
+            #    new_coefficient = original + (-2*original) = -original
+            reaction.add_metabolites({met: -2 * coeff for met, coeff in current_stoich.items()})
+    return model
 
 
 def ex_reaction_id_and_index(model):
@@ -203,7 +222,7 @@ def ex_metabolites_id_and_index(model, extern_compartments):
 def split_extern_reversible_reactions(model):
     """Splitting all reversible extern reactions of a cobrapy model into two cobrapy reaction objects."""
     for reaction in model.reactions:
-        if reaction.reversibility:# and reaction.exchange: # since splitted reactions are not reversible, they dont get splitted again
+        if reaction.reversibility and reaction.exchange: # since splitted reactions are not reversible, they dont get splitted again
             # create backward irreversible reaction from reversible reaction
             backward_reaction = cobra.Reaction(reaction.id + "_b")
             backward_reaction.name = reaction.name # reaction name is the same by purpose (remerging if name is the same)
@@ -226,47 +245,7 @@ def split_extern_reversible_reactions(model):
             reaction.id = reaction.id + "_f"
             #reaction.name = reaction.name
             reaction.lower_bound = 0
-
-
-def as_fraction(number, approximation=None):
-    """
-    Takes integers or floats and converts them to rational strings.
-    
-    Parameters
-    ----------
-    number : int, float
-        Give number for conversion to a rational.
-    approximation : int default None
-        Sets the border for number a denominator can have.
-        If border of 1e12 is set, you get a rational unequal to zero for numbers down to 1e-12 and zero for numbers lower than that.
-        Approximation default is 1e6. Keep attention. Less strict approximation borders can lead to huge numbers which slow down the calculation intensely.
-    
-    Returns
-    -------
-    str
-        A rational or integer number as a string.
-    
-    Examples
-    --------
-    >>> into_fractions(5)
-    '5'
-    >>> into_fractions(0)
-    '0'
-    >>> into_fractions(0.5)
-    '1/2'
-    >>> into_fractions(1/6)
-    '1/6'
-    >>> into_fractions(1/6, approximation=1e20)
-    '6004799503160661/36028797018963968'
-    >>> into_fractions(1/1e6)
-    '1/1000000'
-    >>> into_fractions(1/1e7)
-    '0'
-    """
-    if approximation:    
-        return str(Fraction(number).limit_denominator(int(float(approximation))))
-    else:
-        return str(Fraction(number).limit_denominator())
+    return model
 
 
 def write_h_representation(smatrix, model, tmp_dir, core_name, approximation=None):
@@ -565,315 +544,487 @@ def ECM_queue_processing(ECM_queue, header, chunksize, outputfile):
     output_file.close()
 
 
+if __name__ == '__main__':
 
+    start = time.time()
+    
+    ### argparse ###
+    parser = argparse.ArgumentParser(description="Python script to calculate ECM's from given metabolic model.\n@author: Christian Mayer, Marcus Holzer, Bianca Buchner", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-start = ti.time()
+    # create group for required arguments
+    parser_req = parser.add_argument_group('required arguments')
 
-### argparse ###
-parser = argparse.ArgumentParser(description="Python script to calculate ECM's from given metabolic model.\n@author: Christian Mayer, Marcus Holzer, Bianca Buchner", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser_req.add_argument('-f', '--file',
+                            help='Enter input sbml-File.',
+                            type=str,
+                            metavar='PATH_TO_FILE',
+                            action='store', 
+                            required=True)
+    parser_req.add_argument('-m', '--model_name',
+                            help='Enter name of the model. (not filename) If no --result_name is given, model name is used to name result files.',
+                            type=str,
+                            metavar='STR',
+                            action='store',
+                            required=True)
 
-# create group for required arguments
-parser_req = parser.add_argument_group('required arguments')
-
-parser_req.add_argument('-f', '--file',
-                        help='Enter input sbml-File.',
+    # optional arguments
+    parser.add_argument('-n', '--n_processes',
+                        help='Give number of processes mplrs will use.',
+                        type=int,
+                        metavar='INT',
+                        action='store',
+                        default=3)
+    parser.add_argument('-ch', '--chunksize',
+                        help='Give the size of chunks by number of lines per chunk from V-representation for postprocessing via multiprocessing. Lower chunksizes (e.g. 50000) are preferable on lower sized models.',
+                        type=int,
+                        metavar='INT',
+                        action='store',
+                        default=100000)
+    parser.add_argument('-p', '--parallel',
+                        help='If flag is given, postprocessing will be performed parallel with multiprocessing. This has high RAM usage on big models but postprocessing step is much faster.',
+                        action='store_true')
+    parser.add_argument('-gz', '--gzipped',
+                        help='If flag is given, result file will be .gz file. In parallel mode, creation of a .gz file will take significantly more time.',
+                        action='store_true')
+    parser.add_argument('-t', '--time',
+                        help='If flag is given as an option, script creates an additional json file in outpath with time measurements of different working steps. Note, that total time doesnt measure time for import statements.',
+                        action='store_true')
+    parser.add_argument('--pool',
+                        help='If flag is given, postprocessing will be performed with mp.Pool instead of mp.Process.',
+                        action='store_true')
+    parser.add_argument('-op', '--only_projection',
+                        help='If flag is given, only H-projection will be created in tmp directory. Stops after projection step.',
+                        action='store_true')
+    parser.add_argument('-fv', '--fluxvertices',
+                        help='If flag is given, only V-representation will be created in tmp directory. Stops after vertex enumeration step.',
+                        action='store_true')
+    parser.add_argument('-po', '--only_postprocessing',
+                        help='Give V-representation as input. Only postprocessing and certain steps of preprocessing which are necessary will be performed. Usefull, if comprehensive V-representation of a model already exists.',
                         type=str,
-                        metavar='PATH_TO_FILE',
-                        action='store', 
-                        required=True)
-parser_req.add_argument('-m', '--model_name',
-                        help='Enter name of the model. (not filename) If no --result_name is given, model name is used to name result files.',
+                        metavar='FILE',
+                        action='store',
+                        default=None)
+    parser.add_argument('-mp', '--mplrs',
+                        help='Path to mplrs file.',
+                        type=str,
+                        metavar='FILE',
+                        action='store',
+                        default='mplrsV7_2')
+    parser.add_argument('-o', '--outpath',
+                        help='Directory, where results shall be saved.',
+                        type=str,
+                        metavar='PATH',
+                        action='store',
+                        default='./')
+    parser.add_argument('-rn', '--result_name',
+                        help='File name of result. If this option is not given, name of result file will be outpath + model_name.',
                         type=str,
                         metavar='STR',
                         action='store',
-                        required=True)
+                        default=None)
+    parser.add_argument('-sep', '--separator',
+                        help='Option, which separator output will have. If no --result_name is given, result file will end with .csv for [,;] and .txt for everything else.',
+                        type=str,
+                        metavar='STR',
+                        action='store',
+                        default=',')
+    parser.add_argument('-d', '--decimals',
+                        help='Give the number of decimals, the resulting ECMs will have.',
+                        type=int,
+                        metavar='INT',
+                        action='store',
+                        default=4)
+    parser.add_argument('-ex', '--extern',
+                        help='Give reaction ids as input (e.g. -ex R1 R2). Just the given reactions are marked as extern and will show up in the ECMs. Use only for real extern reactions, not internal ones! Beware, if the chosen reactions are not all extern reactions of the model, results are unbalanced.',
+                        type=str,
+                        nargs='+',
+                        metavar='R1 R2 R3 ...',
+                        action='store',
+                        default=None)
+    parser.add_argument('-tmp', '--tmppath',
+                        help='Directory, where tmp files get stored.',
+                        type=str,
+                        metavar='PATH',
+                        action='store',
+                        default='./tmp/')
+    parser.add_argument('-dv', '--developer',
+                        help='Intermediate files in tmp directory get not deleted. H- and V-representation are maintained.',
+                        action='store_true')
+    parser.add_argument('-v', '--verbose',
+                        help='If flag is given, mplrs will show the whole output.',
+                        action='store_true')
+    parser.add_argument('-ap', '--approximation',
+                        help='Approximation for float numbers converted to rationals for .ine files. The less strict the border, the higher rationals can get. Keep attention, large numbers can lead to intense performance issues. If approximation is set to None (default), border is 1e6. Floats will get "rounded" to fractions with max this number as denominator. (e.g.: 1e3 means denominator can be max 1000 --> 1/1000: 0.001)',
+                        type=str,
+                        metavar='STR',
+                        action='store',
+                        default='1e06')
+    parser.add_argument('-mf', '--mfel',
+                        help='Mplrs project will be performed with mfel file if flag is given as an option.',
+                        action='store_true')
+    parser.add_argument('-ro', '--rows',
+                        help='The number of rows per job for the mplrs algorithm.',
+                        type=int,
+                        metavar='INT',
+                        action='store',
+                        default=20)
+    parser.add_argument('-lr', '--lastrows',
+                        help='The number of rows for the last lastp jobs for the mplrs algorithm.',
+                        type=int,
+                        metavar='INT',
+                        action='store',
+                        default=20)
+    parser.add_argument('-lp', '--lastp',
+                        help='Give the percentage of processes, which get used for lastrows of mplrs algorithm.',
+                        type=int,
+                        metavar='INT',
+                        action='store',
+                        default=10)
+    parser.add_argument('--csv',
+                        help='Path to csv for time stats.',
+                        type=str,
+                        metavar='PATH',
+                        action='store',
+                        default='')
+    
+    
+    args = parser.parse_args()
 
-# optional arguments
-parser.add_argument('-n', '--n_processes',
-                    help='Give number of processes mplrs will use.',
-                    type=int,
-                    metavar='INT',
-                    action='store',
-                    default=3)
-parser.add_argument('-ch', '--chunksize',
-                    help='Give the size of chunks by number of lines per chunk from V-representation for postprocessing via multiprocessing. Lower chunksizes (e.g. 50000) are preferable on lower sized models.',
-                    type=int,
-                    metavar='INT',
-                    action='store',
-                    default=100000)
-parser.add_argument('-p', '--parallel',
-                    help='If flag is given, postprocessing will be performed parallel with multiprocessing. This has high RAM usage on big models but postprocessing step is much faster.',
-                    action='store_true')
-parser.add_argument('-gz', '--gzipped',
-                    help='If flag is given, result file will be .gz file. In parallel mode, creation of a .gz file will take significantly more time.',
-                    action='store_true')
-parser.add_argument('-t', '--time',
-                    help='If flag is given as an option, script creates an additional json file in outpath with time measurements of different working steps. Note, that total time doesnt measure time for import statements.',
-                    action='store_true')
-parser.add_argument('--pool',
-                    help='If flag is given, postprocessing will be performed with mp.Pool instead of mp.Process.',
-                    action='store_true')
-parser.add_argument('-op', '--only_projection',
-                    help='If flag is given, only H-projection will be created in tmp directory. Stops after projection step.',
-                    action='store_true')
-parser.add_argument('-fv', '--fluxvertices',
-                    help='If flag is given, only V-representation will be created in tmp directory. Stops after vertex enumeration step.',
-                    action='store_true')
-parser.add_argument('-po', '--only_postprocessing',
-                    help='Give V-representation as input. Only postprocessing and certain steps of preprocessing which are necessary will be performed. Usefull, if comprehensive V-representation of a model already exists.',
-                    type=str,
-                    metavar='FILE',
-                    action='store',
-                    default=None)
-parser.add_argument('-mp', '--mplrs',
-                    help='Path to mplrs file.',
-                    type=str,
-                    metavar='FILE',
-                    action='store',
-                    default='mplrsV7_2')
-parser.add_argument('-o', '--outpath',
-                    help='Directory, where results shall be saved.',
-                    type=str,
-                    metavar='PATH',
-                    action='store',
-                    default='./')
-parser.add_argument('-rn', '--result_name',
-                    help='File name of result. If this option is not given, name of result file will be outpath + model_name.',
-                    type=str,
-                    metavar='STR',
-                    action='store',
-                    default=None)
-parser.add_argument('-sep', '--separator',
-                    help='Option, which separator output will have. If no --result_name is given, result file will end with .csv for [,;] and .txt for everything else.',
-                    type=str,
-                    metavar='STR',
-                    action='store',
-                    default=',')
-parser.add_argument('-d', '--decimals',
-                    help='Give the number of decimals, the resulting ECMs will have.',
-                    type=int,
-                    metavar='INT',
-                    action='store',
-                    default=4)
-parser.add_argument('-ex', '--extern',
-                    help='Give reaction ids as input (e.g. -ex R1 R2). Just the given reactions are marked as extern and will show up in the ECMs. Use only for real extern reactions, not internal ones! Beware, if the chosen reactions are not all extern reactions of the model, results are unbalanced.',
-                    type=str,
-                    nargs='+',
-                    metavar='R1 R2 R3 ...',
-                    action='store',
-                    default=None)
-parser.add_argument('-tmp', '--tmppath',
-                    help='Directory, where tmp files get stored.',
-                    type=str,
-                    metavar='PATH',
-                    action='store',
-                    default='./tmp')
-parser.add_argument('-dv', '--developer',
-                    help='Intermediate files in tmp directory get not deleted. H- and V-representation are maintained.',
-                    action='store_true')
-parser.add_argument('-v', '--verbose',
-                    help='If flag is given, mplrs will show the whole output.',
-                    action='store_true')
-parser.add_argument('-ap', '--approximation',
-                    help='Approximation for float numbers converted to rationals for .ine files. The less strict the border, the higher rationals can get. Keep attention, large numbers can lead to intense performance issues. If approximation is set to None (default), border is 1e6. Floats will get "rounded" to fractions with max this number as denominator. (e.g.: 1e3 means denominator can be max 1000 --> 1/1000: 0.001)',
-                    type=str,
-                    metavar='STR',
-                    action='store',
-                    default='1e06')
-parser.add_argument('-mf', '--mfel',
-                    help='Mplrs project will be performed with mfel file if flag is given as an option.',
-                    action='store_true')
-parser.add_argument('-ro', '--rows',
-                    help='The number of rows per job for the mplrs algorithm.',
-                    type=int,
-                    metavar='INT',
-                    action='store',
-                    default=20)
-parser.add_argument('-lr', '--lastrows',
-                    help='The number of rows for the last lastp jobs for the mplrs algorithm.',
-                    type=int,
-                    metavar='INT',
-                    action='store',
-                    default=20)
-parser.add_argument('-lp', '--lastp',
-                    help='Give the percentage of processes, which get used for lastrows of mplrs algorithm.',
-                    type=int,
-                    metavar='INT',
-                    action='store',
-                    default=10)
+    # process id
+    print(f'Process ID: {os.getpid()}')
+    
+    ### set names
+    sbmlfile = args.file
+    core_name = args.model_name
+    path_mplrs = args.mplrs
+    n_processes = args.n_processes
+    separator = args.separator
+    decimals = args.decimals
+    approximation = args.approximation
+    rows = args.rows
+    lastp = args.lastp
+    lastrows = args.lastrows
+    chunksize = args.chunksize
+    developer = args.developer
+    verbose = args.verbose
+    gzipped = args.gzipped
+    only_projection = args.only_projection
+    fluxvertices = args.fluxvertices
+    only_postprocessing = args.only_postprocessing
+    parallel = args.parallel
+    extern = args.extern
+    pool_switch = args.pool
+    logTimesFile = args.csv
+    if logTimesFile == "":
+        logTimesFile = outpath + core_name + '_times.csv'
+    if os.path.exists(logTimesFile):
+        os.remove(logTimesFile)
+        
+    time_start = time.time()
+    logTimeToCSV(logTimesFile, "Start", "Start", 0)
+    time_initial_setup_start = time.time()
+    
+    if pool_switch and not parallel:
+        raise Exception('The --pool option can only be performed if --parallel option is enabled.')
 
+    # set temporary directory
+    tmp_dir = args.tmppath + '/'
+    # set result directory
+    outpath = args.outpath #'./'
 
-args = parser.parse_args()
+    # test if outpath directory exists
+    if not os.path.isdir(outpath):
+        os.mkdir(outpath)
+        print(f'Created directory {outpath}.')
 
+    # test if path for tmp file exists
+    if not os.path.isdir(tmp_dir):
+        os.mkdir(tmp_dir)
+        print(f'Created directory {tmp_dir}.')
 
-# process id
-print(f'Process ID: {os.getpid()}')
-
-### set names
-sbmlfile = args.file
-core_name = args.model_name
-path_mplrs = args.mplrs
-n_processes = args.n_processes
-separator = args.separator
-decimals = args.decimals
-approximation = args.approximation
-rows = args.rows
-lastp = args.lastp
-lastrows = args.lastrows
-chunksize = args.chunksize
-developer = args.developer
-verbose = args.verbose
-gzipped = args.gzipped
-only_projection = args.only_projection
-fluxvertices = args.fluxvertices
-only_postprocessing = args.only_postprocessing
-parallel = args.parallel
-extern = args.extern
-pool_switch = args.pool
-
-if pool_switch and not parallel:
-    raise Exception('The --pool option can only be performed if --parallel option is enabled.')
-
-# set temporary directory
-tmp_dir = args.tmppath + '/'
-# set result directory
-outpath = args.outpath #'./'
-
-# test if outpath directory exists
-if not os.path.isdir(outpath):
-    os.mkdir(outpath)
-    print(f'Created directory {outpath}.')
-
-# test if path for tmp file exists
-if not os.path.isdir(tmp_dir):
-    os.mkdir(tmp_dir)
-    print(f'Created directory {tmp_dir}.')
-
-# get path, where this file is saved
-dir_path = os.path.dirname(os.path.realpath(__file__))
-# mfel file always has to be in directory ./mplrs_scripts/
+    # get path, where this file is saved
+    dir_path = os.path.dirname(os.path.realpath(__file__))
+    # mfel file always has to be in directory ./mplrs_scripts/
 
 
-# set input and output file
-if not only_postprocessing:
-    v_representation = tmp_dir + core_name + '.projected'
-else:
-    v_representation = only_postprocessing
-
-if args.result_name:
-    outputfile = args.result_name
-else:
-    if (separator == ',') or (separator == ';'):
-        end_of_file = 'csv'
+    # set input and output file
+    if not only_postprocessing:
+        v_representation = tmp_dir + core_name + '.projected'
     else:
-        end_of_file = 'txt'
+        v_representation = only_postprocessing
 
-    if gzipped:
-        outputfile = outpath + core_name + '_ecms.' + end_of_file + '.gz'
+    if args.result_name:
+        outputfile = args.result_name
     else:
-        outputfile = outpath + core_name + '_ecms.' + end_of_file
+        if (separator == ',') or (separator == ';'):
+            end_of_file = 'csv'
+        else:
+            end_of_file = 'txt'
 
-### preprocessing
+        if gzipped:
+            outputfile = outpath + core_name + '_ecms.' + end_of_file + '.gz'
+        else:
+            outputfile = outpath + core_name + '_ecms.' + end_of_file
 
-# create temporary directory
-try:
-    os.mkdir(tmp_dir)
-except FileExistsError as error:
-    print('Directory for temporary files already exists.')
+    ### preprocessing
 
-# read in model via cobra
-model, added_reas = read_model(sbmlfile)
-# remove added reactions from cobra if added
-model = rm_reactions(model, added_reas)
-print(f'Model: {sbmlfile} succesfully parsed with cobra.')
+    # create temporary directory
+    try:
+        os.mkdir(tmp_dir)
+    except FileExistsError as error:
+        print('Directory for temporary files already exists.')
 
-# get extern compartments (also compartments with no name are taken but filtered out later)
-extern_compartments = get_extern_compartments(model)
+    # read in model via cobra
+    model, added_reas = read_model(sbmlfile)
+   
+    # remove added reactions from cobra if added
+    model = rm_reactions(model, added_reas)
+    print(f'Model: {sbmlfile} succesfully parsed with cobra.')
 
-# add an exchange attribute to all reactions
-if extern:
-    # if extern reactions are given manually
-    mark_exchange(model, extern)
-else:
-    # proof all reactions if they are exchange reactions
-    indicate_exchange(model, extern_compartments)
+    # get extern compartments (also compartments with no name are taken but filtered out later)
+    extern_compartments = get_extern_compartments(model)
 
-# split all reversible reactions given by new_ex_reactions
-split_extern_reversible_reactions(model)
+    # add an exchange attribute to all reactions
+    if extern:
+        # if extern reactions are given manually
+        mark_exchange(model, extern)
+    else:
+        # proof all reactions if they are exchange reactions
+        indicate_exchange(model, extern_compartments)
 
-# create ex_reactions with splitted reactions
-ex_reactions = ex_reaction_id_and_index(model)
-print(ex_reactions)
-# write direction of each reaction as an attribute
-write_reaction_direction(model)
+    # split all reversible reactions given by new_ex_reactions
+    model = split_extern_reversible_reactions(model)
 
-if not only_postprocessing:
-    # create stochiometric matrix with splitted reactions
-    smatrix = cobra.util.array.create_stoichiometric_matrix(model)
-    np.savetxt('matrix.csv', smatrix, delimiter=',', fmt='%d')
-    # correct stochiometric matrix for backward reactions
-    smatrix = correct_stochiometric_matrix(model, smatrix)
-    np.savetxt('matrix_out.csv', smatrix, delimiter=',', fmt='%d')
-    ### create H- and V-representation
-    # write H-representation to .ine file from cobra model
-    # write_h_representation(smatrix, model, tmp_dir, core_name, approximation=approximation)
+    # remove blocked reactions
+    blocked_rxns = cobra.flux_analysis.find_blocked_reactions(model)
+    model.remove_reactions(blocked_rxns)
+    print(f"Removed {len(blocked_rxns)} blocked reactions (excluding exchange reactions).")
 
-    # perform mplrs redund on file; create .postredund file
-    # redund(n_processes, path_mplrs, tmp_dir, core_name, verbose=verbose)
-    # rewrite postredund file
-    # rewrite_postredund_file(tmp_dir, core_name) # deletes last rows of .postredund files
+    # write direction of each reaction as an attribute
+    model = write_reaction_direction(model)
 
-# cobra.io.write_sbml_model(model, 'your_model.xml')
-# exit()
-from projection.enumeration import getMatrixFromHrepresentation, convertMatrixToVRepresentation, convertHtoVrepresentation, convertMatrixToHRepresentation, convertEqualities2hRep
-convertEqualities2hRep(smatrix, os.path.join(tmp_dir, core_name+".ine"))
-redund(n_processes, path_mplrs, tmp_dir, core_name, verbose=verbose)
-inpMatrix = getMatrixFromHrepresentation(os.path.join(tmp_dir, core_name+"_postredund.ine"))
-inpMatrix = smatrix
+    if not only_postprocessing:
+        # create stochiometric matrix with splitted reactions
+        model = correct_stochiometric_matrix(model)
 
-from projection.projection import runMarashiWithPolco, runMarashiWithMPLRS, runFELWithPolco, runMarashiWithPolcoIterative, runMarashiWithPolcoSubsets
-for i, r in enumerate(model.reactions):
-    print(f"{i}: {r.id}")
 
-for i, r in enumerate(model.metabolites):
-    print(f"{i}: {r.id}")
+        # create ex_reactions with splitted reactions
+        ex_reactions = ex_reaction_id_and_index(model)
+        print(ex_reactions)
+        smatrix = cobra.util.array.create_stoichiometric_matrix(model)
+        df = pd.DataFrame(
+            smatrix,
+            index=[met.id for met in model.metabolites],
+            columns=[rxn.id for rxn in model.reactions]
+        )
+        
+        # Save the DataFrame as a CSV file
+        df.to_csv("stoichiometric_matrix_new.csv",header=True, index=True)
+       
+    
+    
+    convertEqualities2hRep(smatrix, os.path.join(tmp_dir, core_name+".ine"))
+    redund(n_processes, path_mplrs, tmp_dir, core_name, verbose=verbose)
+    inpMatrix = getMatrixFromHrepresentation(os.path.join(tmp_dir, core_name+"_postredund.ine"))
 
-polcoPath = "polco.jar"
-mplrsPath = "mplrsV7_2"
+    # for i, r in enumerate(model.reactions):
+    #     print(f"{i}: {r.id}")
 
-reactions = [item[1] for item in ex_reactions]
-print(f"InputReactions: {reactions}")
-# exit()
-originalReactions = reactions
-lenOriginalReactions = len(reactions)
-remaining_reactions = [i for i in range(inpMatrix.shape[1]) if i not in reactions]
-reactions = reactions + remaining_reactions
-inpMatrix = inpMatrix[:, reactions]
-print(reactions)
-lenCurrentReactions = len(reactions)
-stepSize = 5
-iteration = 0
-while lenCurrentReactions - stepSize > lenOriginalReactions:
-    print(f"Iter: {lenCurrentReactions}")
-    lenCurrentReactions -= stepSize
-    if lenCurrentReactions < lenOriginalReactions:
-        break
-    tempFolder = f"testResults/polco_ecoli_cmayer_jupyter/iter_{iteration}/"
+    # for i, r in enumerate(model.metabolites):
+    #     print(f"{i}: {r.id}")
+    reversibleList = np.array([], dtype=bool)
+    for reaction in model.reactions:
+        if reaction.reversibility:
+            reversibleList = np.append(reversibleList, False)
+        else:
+            reversibleList = np.append(reversibleList, True)
+
+    reactions = [item[1] for item in ex_reactions]
+    print(f"Length: {len(reactions)}, InputReactions: {reactions}")
+    # exit()
+
+    originalReactions = reactions
+    lenOriginalReactions = len(reactions)
+    remaining_reactions = [i for i in range(inpMatrix.shape[1]) if i not in reactions]
+    reactions = reactions + remaining_reactions
+    inpMatrix = inpMatrix[:, reactions]
+    reversibleList = reversibleList[reactions]
+    # inpMatrix = -inpMatrix[:, reactions]
+    # sortReactions = get_sorted_column_indices_from_array(inpMatrix, lenOriginalReactions)
+    # sortReactions = list(range(lenOriginalReactions)) + sortReactions
+    # inpMatrix = inpMatrix[:, sortReactions]
+    # print(sortReactions)
+    time_initial_setup_end = time.time()
+    logTimeToCSV(logTimesFile, "Initial Setup", "Initial Setup", time_initial_setup_end - time_initial_setup_start)
+    
+    print(reactions)
+    lenCurrentReactions = len(reactions)
+    lenReactionsToDelete = len(remaining_reactions)
+    stepSize = 2
+    iteration = 0
+    while lenCurrentReactions - stepSize > lenOriginalReactions:
+        print(f"Iter: {iteration}. Removed reactions: {iteration*stepSize}/{lenReactionsToDelete}")
+        lenCurrentReactions -= stepSize
+        if lenCurrentReactions < lenOriginalReactions:
+            break
+        tempFolder = f"testResults/mplrs_iterative_ecoli_cmayer_jupyter/iter_{iteration}/"
+        if not os.path.exists(tempFolder):
+            os.makedirs(tempFolder)
+        sortReactions = get_sorted_column_indices_from_array(inpMatrix, lenOriginalReactions)
+        sortReactions = list(range(lenOriginalReactions)) + sortReactions
+        print(sortReactions)
+        # print(reversibleList)
+        inpMatrix = inpMatrix[:,sortReactions]
+        reversibleList = reversibleList[sortReactions]
+        inpMatrix, efps = runMarashiWithMPLRSSubsets(inpMatrix, reactions[:lenCurrentReactions], tempFolder, 20, True, True, iteration=iteration,originalProjectionReactions=originalReactions,logTimesFile=logTimesFile, reversibleList=reversibleList)
+        reversibleList = reversibleList[list(range(lenCurrentReactions))]
+        #inpMatrix = -inpMatrix
+        iteration += 1
+        if lenCurrentReactions < 225:
+            stepSize = 2
+        # if lenCurrentReactions < 65:
+        #     stepSize = 5
+        # if lenCurrentReactions < 130:
+            # stepSize = 2
+        # exit()
+    #exit(0)
+    tempFolder = f"testResults/mplrs_iterative_ecoli_cmayer_jupyter/iter_{iteration}/"
     if not os.path.exists(tempFolder):
         os.makedirs(tempFolder)
-    inpMatrix, efps = runMarashiWithPolcoSubsets(inpMatrix, reactions[:lenCurrentReactions], tempFolder, 4, True, True, iteration=iteration,originalProjectionReactions=originalReactions)
-    #inpMatrix = -inpMatrix
-    iteration += 1
-    # exit()
-#exit(0)
-tempFolder = f"testResults/polco_ecoli_cmayer_jupyter/iter_{iteration}/"
-if not os.path.exists(tempFolder):
-    os.makedirs(tempFolder)
-proCEMs, efps = runMarashiWithPolcoSubsets(inpMatrix, reactions[:lenOriginalReactions], tempFolder, 4, False, True, iteration=iteration,originalProjectionReactions=originalReactions)
+    proCEMs, efps = runMarashiWithMPLRSSubsets(inpMatrix, reactions[:lenOriginalReactions], tempFolder, 20, False, True, iteration=iteration,originalProjectionReactions=originalReactions,logTimesFile=logTimesFile, reversibleList=reversibleList)
 
-#proCEMs, efps = runMarashiWithPolcoIterative(inpMatrix, inpReactions, "testResults/polco_iterative_ecoli_cmayer_jupyter/", 100, False, True)
-#proCEMs, efps = runMarashiWithPolco(inpMatrix, inpReactions, "testResults/polco_ecoli_cmayer_jupyter/", 100, False, True)
-#proCEMs, efps = runMarashiWithMPLRS(inpMatrix, inpReactions, "testResults/mplrs_ecoli_cmayer_jupyter/", mplrsPath, 100, False, True)
-# proCEMs, efps = runFELWithPolco(inpMatrix, inpDims, "~/secondDraft/testResults/fel/", mplrsPath)
-logger.info(f"proCEMS: {len(proCEMs)}")
-logger.info(f"efps: {len(efps)}")
+    #proCEMs, efps = runMarashiWithPolcoIterative(inpMatrix, inpReactions, "testResults/polco_iterative_ecoli_cmayer_jupyter/", 100, False, True)
+    #proCEMs, efps = runMarashiWithPolco(inpMatrix, inpReactions, "testResults/polco_ecoli_cmayer_jupyter/", 100, False, True)
+    #proCEMs, efps = runMarashiWithMPLRS(inpMatrix, inpReactions, "testResults/mplrs_ecoli_cmayer_jupyter/", mplrsPath, 100, False, True)
+    # proCEMs, efps = runFELWithPolco(inpMatrix, inpDims, "~/secondDraft/testResults/fel/", mplrsPath)
+    print(f"proCEMS: {len(proCEMs)}")
+    print(f"efps: {len(efps)}")
+
+    time_postprocessing_start = time.time()
+
+    v_representation = os.path.join(tempFolder, "redund_proCEMs_V.ine")
+    reaction_pair_index = merge_model(model)
+    # create stochiometric matrix again with merged reactions (needed for calculation of ECMs)
+    # stochiometric matrix with m * r
+    smatrix = cobra.util.array.create_stoichiometric_matrix(model)
+    # correct stochiometric matrix for irreversible backward reactions
+    # smatrix = correct_stochiometric_matrix(model, smatrix)
+    # create ex_reactions again with merged reactions
+    ex_reactions = ex_reaction_id_and_index(model)
+    # get all metabolites attached to external reactions and their indices
+    ex_metabolites = ex_metabolites_id_and_index(model, extern_compartments)
+    # slice stochiometric matrix to just get metabolites attached to extern reactions and extern reactions
+    smatrix = slice_stochio_matrix(smatrix, ex_reactions, ex_metabolites)
+
+    ### create ECMs from V-representation
+
+    # get number of extern reactions after merging the model
+    n_reactions = len(ex_reactions)
+
+    if parallel:
+        print(f'Performing postprocessing in multiprocessing mode.')
+
+    ### output ECMs
+    print(f'Reading in V-representation and output results.')
+    ## header
+    # create header for result
+    header = write_output_header(ex_metabolites, separator=separator)
+    # write header if not gzipped
+    # since all output for .gz files have to derive from the same process, gzipped header is not written here (lookup in queue_processing function)
+    outputfile = os.path.join(tempFolder, "out.ine")
+    if not gzipped:
+        output_file = open(outputfile, "w+")
+        output_file.write(header + '\n')
+        output_file.close()
+    if gzipped and not parallel:
+        output_file = gzip.open(outputfile, 'wb')
+        output_file.write((header + '\n').encode())
+        output_file.close()
+
+    ## convert pre_ECM chunks to ECM chunks and write them to output via multiprocessing or single processing
+
+    if pool_switch:
+        control = False
+    else:
+        # defining semaphore to control maximal number of parllel processes
+        control = mp.Semaphore(n_processes)
+
+
+    with mp.Manager() as manager:
+        # write queue for ECMs and counts
+        count_queue = manager.Queue() # stays empty if not gzipped
+        ECM_queue = manager.Queue() # stays empty if not gzipped
+        
+        # setting function object with arguments
+        postprocessing_part = partial(postprocessing, ECM_queue, count_queue, reaction_pair_index, n_reactions, smatrix, outputfile, separator, decimals, gzipped, parallel, control)
+        
+        # set up name for total number of ECMs
+        if parallel and gzipped:
+            # write mp value for ECM_count
+            ECM_count = manager.Value('i', 0)
+        if not parallel:
+            ECM_count = 0
+        
+        with mp.Pool(n_processes) as pool:
+            # open v_representation
+            with open(v_representation, "r") as inputfile:
+                n = 0
+                while True:
+                    n += 1
+                    # take n_lines (chunksize) from file generator object, put them into a list (array)
+                    v_chunk = list(islice(inputfile, chunksize))
+                    
+                    if not v_chunk:               
+                        if parallel:
+                            print(f'Total number of executed processes for postprocessing: {n-1}')
+                            if pool_switch: # the more pythonic and "stable" approach but needs a lot of RAM on big vertex enumeration files
+                                pool.close()
+                                pool.join()
+                            else:
+                                if chunksize < 50000:
+                                    time.sleep(0.5 + (chunksize * 0.00001)) # sleep is needed to get all ECMs of the last chunks since last process sometimes finishes earlier than processes before
+                                else:
+                                    time.sleep(chunksize * 0.00005)
+                                process.join()
+                                
+                            if gzipped:
+                                count_queue_process.join()
+                                ECM_queue_process.join()
+                                ECM_count = ECM_count.value # get total number of ECMs
+                        break
+                    
+                    if parallel and not pool_switch:
+                        control.acquire()
+                        # process postprocessing with cores from pool
+                        process = mp.Process(target=postprocessing, args=[ECM_queue, count_queue, reaction_pair_index, n_reactions, smatrix, outputfile, separator, decimals, gzipped, parallel, control, v_chunk])
+                        process.start() # start the child process with chunk
+                    elif parallel and pool_switch:
+                        pool.apply_async(postprocessing_part, (v_chunk, ))
+                    else:
+                        count = postprocessing(ECM_queue, count_queue, reaction_pair_index, n_reactions, smatrix, outputfile, separator, decimals, gzipped, parallel, control, v_chunk)
+                        ECM_count += count
+
+                    if n == 1 and parallel and gzipped:
+                        # add count output
+                        count_queue_process = mp.Process(target=count_queue_processing, args=[count_queue, ECM_count, chunksize])
+                        count_queue_process.start()
+                        # write ECM output to gzip file
+                        # has to be done in parallel since queue only has a certain number of entries it can hold at a time
+                        # it is inportant, that only the same process writes to .gz file --> so it got serialized here
+                        ECM_queue_process = mp.Process(target=ECM_queue_processing, args=[ECM_queue, header, chunksize, outputfile])
+                        ECM_queue_process.start()
+
+    # calculate number of ECMs in parallel mode
+    # got seperated from count_queue, since this queue does not give reliable ECM counts all the time
+    if parallel and not gzipped: # gzipped nevertheless works with this queue since we cant ask wc -l on gzip file to get unzipped number of lines
+        cmd = ["wc", "-l", outputfile]
+        ECM_count_process = subprocess.run(cmd, capture_output=True, text=True)
+        ECM_count = ECM_count_process.stdout
+        ECM_count = int(ECM_count.split()[0]) -1
+    time_postprocessing_end = time.time()
+    logTimeToCSV(logTimesFile, f"Iter {iteration}", "Postprocessing proCEMs", time_postprocessing_end - time_postprocessing_start)
+
+    time_end = time.time()
+    print(f"Runtime: {time_end - time_start} seconds")
+    logTimeToCSV(logTimesFile, "End", "End", time_end)
+    print(f'{ECM_count} ECMs are found.')

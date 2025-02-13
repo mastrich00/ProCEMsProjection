@@ -1,14 +1,16 @@
 import numpy as np
 import subprocess
+import time
 from datetime import datetime
 from projection.helpers import printDatetime
 from projection.marashiProjectionHelpers import sortStoicMatrix, buildInterestedMatrix, buildEliminationMatrix, buildProjectedConeMatrix, \
-    calculateEFPsFromProCEMs
+    calculateEFPsFromProCEMs, logTimeToCSV
 from projection.enumeration import doubleDescription, doubleDescriptionINE, convertMatrixToHRepresentation, convertMatrixToVRepresentation, getMatrixFromHrepresentation,convertEqualitiesAndInequalities2hRep, \
     getRaysFromVrepresentation, convertHtoVrepresentation, mplrs_conversion, convertEqualities2hRep
-from projection.redund import redund, redundIterative
+from projection.redund import redund, redundIterative, normalize_matrix_by_gcd_and_scale, process_matrix
 from projection.logging_config import logger
 import os
+from fractions import Fraction
 if not os.getenv("POLCO_PATH"):
     load_dotenv("env") # load env
     
@@ -16,57 +18,213 @@ POLCO_PATH = os.getenv("POLCO_PATH")
 mplrsPath = MPLRS_PATH = os.getenv("MPLRS_PATH")
 mplrsPath = MPLRS_PATH = "mplrsV7_2"
 import os
+import time
 
-def runMarashiWithMPLRSSubsets(stoicMatrix, projectOntoDimensions, outputDir, numThreads=8, stopAfterProjection=True, verbose = True, iteration=0):
+def round_sig(x, sig=15):
+    """
+    Round a number to 'sig' significant figures.
+    Returns 0.0 if x is zero.
+    """
+    if x == 0:
+        return 0.0
+    # Compute the number of digits after the decimal point required
+    n_digits = int(sig - np.floor(np.log10(abs(x))) - 1)
+    return round(x, n_digits)
+
+def scale_and_round_row_np(row, sig=15):
+    """
+    Given a row (list or NumPy array) representing an inequality,
+    scale it so that the maximum absolute value is about 10^(sig)
+    (i.e. roughly sig digits) and then round each entry to sig
+    significant figures.
+    """
+    # Convert the row to a NumPy array (float64 for precision)
+    row = np.array(row, dtype=np.float64)
+    
+    # Identify nonzero entries (to avoid log10(0))
+    nonzero = row != 0
+    if not np.any(nonzero):
+        return row  # if all entries are zero, no scaling is needed.
+    
+    # Find the maximum absolute nonzero value
+    max_val = np.max(np.abs(row[nonzero]))
+    
+    # Compute scaling factor:
+    # We want to bring the order of magnitude of max_val to about 10^sig.
+    factor = 10 ** (np.ceil(np.log10(max_val)) - sig)
+    
+    # Scale the row by the factor
+    scaled_row = row / factor
+    
+    # Vectorize the round_sig function to apply it elementwise
+    vec_round_sig = np.vectorize(round_sig)
+    rounded_row = vec_round_sig(scaled_row, sig)
+    
+    return rounded_row
+
+def truncate_float(x, digits):
+    factor = 10 ** digits
+    return np.round(x * factor) / factor
+                
+def normalize_row_if_needed(row, digit_threshold=12, trunc_digits=3):
+    """
+    Normalizes the row so that its elements sum to 1 only if at least one element 
+    in the row has more than norm_threshold digits in its numerator or denominator.
+    
+    After normalization, if any normalized value has a numerator or denominator with 
+    more than digit_threshold digits, then each value is reduced as follows: its 
+    floating-point value is truncated to trunc_digits digits after the decimal point 
+    (i.e. any extra decimals are cut off) and then converted back to a Fraction.
+    """
+    # Decide if normalization is needed based on the original fractions.
+    needs_normalization = any(
+        len(str(abs(x.numerator))) > digit_threshold or len(str(abs(x.denominator))) > digit_threshold
+        for x in row
+    )
+    
+    if needs_normalization:            
+            # Truncate each normalized element to trunc_digits decimal places,
+            # then convert back to a Fraction.
+            normalized_truncated = [
+                Fraction(truncate_float(float(val), trunc_digits))
+                for val in row
+            ]
+            return np.array(normalized_truncated, dtype=object)
+    else:
+        # If no element requires normalization, return the row unchanged.
+        return row
+            
+def get_sorted_column_indices_from_array(arr, lenOriginalReactions):
+    """
+    Given a 2D numpy array, ignores the first 24 columns and returns a list of 
+    original column indices (of the remaining columns) ordered by descending sum 
+    of the absolute values of their entries.
+
+    Parameters:
+        arr (np.array): A 2D numpy array.
+
+    Returns:
+        List[int]: Sorted original column indices (ignoring the first 24 columns) 
+                   ordered by descending sum of absolute values.
+    """
+    # Verify that the array has more than 24 columns.
+    if arr.shape[1] <= lenOriginalReactions:
+        raise ValueError(f"The array must have more than {lenOriginalReactions} columns.")
+    
+    # Select columns after the first 24.
+    remaining_columns = arr[:, lenOriginalReactions:]
+    
+    # Compute the sum of absolute values for each of the remaining columns.
+    abs_sums = np.sum(np.abs(remaining_columns), axis=0)
+    
+    # Get the indices that would sort these sums in descending order.
+    # np.argsort sorts in ascending order by default, so we sort the negative values to reverse the order.
+    sorted_order = np.argsort(-abs_sums)
+    
+    # Adjust the indices to match the original array by adding the offset (24).
+    original_indices = sorted_order + lenOriginalReactions
+    
+    return original_indices.tolist()
+
+def runMarashiWithMPLRSSubsets(stoicMatrix, projectOntoDimensions, outputDir, numThreads=8, stopAfterProjection=True, verbose = True, iteration=0, originalProjectionReactions=[], logTimesFile="times.csv", reversibleList=[]):
+    time_setup_stoic_start = time.time()
     printDatetime("Start:", datetime.now())
     sortedStoicMatrix = stoicMatrix
+    convertMatrixToHRepresentation(sortedStoicMatrix, os.path.join(outputDir, "stoicMatrix.ine"))
     if iteration == 0:
-        eliminationMatrix = buildEliminationMatrix(sortedStoicMatrix, projectOntoDimensions) # build H
-        interestedMatrix = buildInterestedMatrix(sortedStoicMatrix, projectOntoDimensions) # build G
-        if verbose:
-            logger.info("InterestedMatrix:")
-            logger.info(interestedMatrix)
+        p = len(originalProjectionReactions)
+        q = sortedStoicMatrix.shape[1] - p
+        convertEqualitiesAndInequalities2hRep(sortedStoicMatrix, -np.identity(p+q)[reversibleList],
+            os.path.join(outputDir, f"{iteration}_stoicMatrix.ine")
+        )
+        # convertEqualitiesAndInequalities2hRep(sortedStoicMatrix, 
+        #     np.hstack([
+        #         np.vstack([
+        #             -np.identity(p),
+        #             np.zeros((q,p))]),
+        #         np.vstack([
+        #             np.zeros((p,q)),
+        #             -np.identity(q)]),
+        #     ]),
+        #     os.path.join(outputDir, f"{iteration}_stoicMatrix.ine")
+        # )
+        # convertEqualitiesAndInequalities2hRep(stoicMatrix[:,:len(originalProjectionReactions)], np.identity(stoicMatrix[:,:len(originalProjectionReactions)].shape[1]), os.path.join(outputDir, f"{iteration}_stoicMatrixInterested.ine"))
+        # redund(numThreads,mplrsPath, os.path.join(outputDir, f"{iteration}_stoicMatrixElimination.ine"),os.path.join(outputDir, f"{iteration}_redund_stoicMatrixElimination.ine"))
+        redund(numThreads,mplrsPath, os.path.join(outputDir, f"{iteration}_stoicMatrix.ine"),os.path.join(outputDir, f"{iteration}_stoicMatrix_redund.ine"))
+        sortedStoicMatrix = getMatrixFromHrepresentation(os.path.join(outputDir, f"{iteration}_stoicMatrix_redund.ine"))
+        # if verbose:
+        #     logger.info("InterestedMatrix:")
+        #     logger.info(interestedMatrix)
+        # colsElimination = eliminationMatrix.shape[1] - (sortedStoicMatrix.shape[1] - len(projectOntoDimensions))
+        # interestedMatrix = np.hstack([interestedMatrix, eliminationMatrix[:,:colsElimination]])
+        # eliminationMatrix = eliminationMatrix[:,colsElimination:]
+        interestedMatrix = sortedStoicMatrix[:,:len(projectOntoDimensions)]
+        eliminationMatrix = sortedStoicMatrix[:,len(projectOntoDimensions):]
     else:
         interestedMatrix = sortedStoicMatrix[:, :len(projectOntoDimensions)]
         eliminationMatrix = sortedStoicMatrix[:, len(projectOntoDimensions):]
+    eliminationMatrix = eliminationMatrix.transpose()
+    print(f"shape el: {eliminationMatrix.shape}")
+    print(f"shape int: {interestedMatrix.shape}")
+    time_setup_stoic_end = time.time()
+    logTimeToCSV(logTimesFile, f"Iter {iteration}", "Setup Elimination-Matrix", time_setup_stoic_end - time_setup_stoic_start)
     
+    time_projectioncone_conversion_start = time.time()
     hEliminationInePath = os.path.join(outputDir, "elimination_H.ine")
     hEliminationRedundInePath = os.path.join(outputDir, "elimination_redund_H.ine")
     vEliminationInePath = os.path.join(outputDir, "elimination_V.ine")
-    convertEqualitiesAndInequalities2hRep(eliminationMatrix.transpose(), np.identity(eliminationMatrix.shape[0]), hEliminationInePath) # build W as ine file
+    vEliminationRedundInePath = os.path.join(outputDir, "elimination_redund_V.ine")
+    convertEqualitiesAndInequalities2hRep(eliminationMatrix, np.identity(eliminationMatrix.shape[1]), hEliminationInePath) # build W as ine file
     printDatetime("Finished creating eliminiation_H.ine:", datetime.now())
     redund(numThreads,mplrsPath,hEliminationInePath,hEliminationRedundInePath) # remove redundancy
     mplrs_conversion(numThreads, mplrsPath, hEliminationRedundInePath, vEliminationInePath) # convert to v-representation
-    printDatetime("Finished mplrs conversion:", datetime.now())
+    # mplrs_conversion(numThreads, mplrsPath, hEliminationInePath, vEliminationInePath) # convert to v-representation
+    time_projectioncone_conversion_end = time.time()
+    logTimeToCSV(logTimesFile, f"Iter {iteration}", "Enumeration Projection-Cone", time_projectioncone_conversion_end - time_projectioncone_conversion_start)
+
+    time_rays_redund_start = time.time()
+    printDatetime("Finished mplrs conversion:", datetime.now())    
     rayMatrix = getRaysFromVrepresentation(vEliminationInePath)
+    time_rays_redund_end = time.time()
+    logTimeToCSV(logTimesFile, f"Iter {iteration}", "Redund Rays", time_rays_redund_end - time_rays_redund_start)
     logger.info(f"Raymatrix - Shape: {rayMatrix.shape}")
     if verbose:
         logger.info("RayMatrix:")
         logger.info(rayMatrix)
 
-    #interestedMatrix = buildInterestedMatrix(sortedStoicMatrix, projectOntoDimensions) # build G
     if verbose:
         logger.info("InterestedMatrix:")
         logger.info(interestedMatrix)
-    projectedConeMatrix = -buildProjectedConeMatrix(rayMatrix, interestedMatrix)
+        
+    time_build_projectedcone_start = time.time()
+    projectedConeMatrix = buildProjectedConeMatrix(rayMatrix, interestedMatrix)
     logger.info(f"projectedConeMatrix - Shape: {projectedConeMatrix.shape}")
+    time_build_projectedcone_end = time.time()
+    logTimeToCSV(logTimesFile, f"Iter {iteration}", "Build projected Cone", time_build_projectedcone_end - time_build_projectedcone_start)
 
+    time_redund_projectedcone_start = time.time()
     hProjectedConeInePath = os.path.join(outputDir, f"{iteration}_projectedCone_H.ine")
+    #projectedConeMatrix = normalize_matrix_by_gcd_and_scale(projectedConeMatrix)
+    # projectedConeMatrix = np.array([normalize_row_if_needed(row) for row in projectedConeMatrix], dtype=object)
     convertMatrixToHRepresentation(projectedConeMatrix, hProjectedConeInePath)
     printDatetime("Finished converting projected Cone Matrix to H-Rep:", datetime.now())
+    if projectedConeMatrix.shape[0] > 300000:
+        print(f"Error: shape={projectedConeMatrix.shape}")
+        exit(0)
 
     hRedundProjectedConeInePath = os.path.join(outputDir, "projectedConeMatrix_H_redund.ine")
     if not os.path.exists(os.path.join(outputDir,"temp")):
         os.mkdir(os.path.join(outputDir,"temp"))
-    chunkSize = 10000
-    logger.info(f"Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} with chunkSize {chunkSize}")
+    # chunkSize = 10000
+    #logger.info(f"Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} with chunkSize {chunkSize}")
     #redundIterative(numThreads, mplrsPath, hProjectedConeInePath, os.path.join(outputDir, "tempOutprojectedCone_H.ine"), os.path.join(outputDir,"temp"), chunkSize=chunkSize, verbose=True)
     #logger.info(f"End: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    redund(numThreads,mplrsPath,hProjectedConeInePath,hRedundProjectedConeInePath) # remove redundancy
-
-    #redund(numThreads, mplrsPath, hProjectedConeInePath, hRedundProjectedConeInePath)
+    redund(numThreads, mplrsPath, hProjectedConeInePath, hRedundProjectedConeInePath)
     printDatetime("Finished redund step:", datetime.now())
     matrix = getMatrixFromHrepresentation(hRedundProjectedConeInePath)
+    # matrix = getMatrixFromHrepresentation(hProjectedConeInePath)
+    time_redund_projectedcone_end = time.time()
+    logTimeToCSV(logTimesFile, f"Iter {iteration}", "Redund projected Cone", time_redund_projectedcone_end - time_redund_projectedcone_start)
     if verbose:
         logger.info("projectedConeMatrix:")
         logger.info(projectedConeMatrix)
@@ -74,14 +232,39 @@ def runMarashiWithMPLRSSubsets(stoicMatrix, projectOntoDimensions, outputDir, nu
     if stopAfterProjection:
         return matrix, None
 
+    time_enumerate_projectedcone_start = time.time()
     vProjectedConeInePath = os.path.join(outputDir, "projectedConeMatrix_V.ine")
-    convertHtoVrepresentation(hRedundProjectedConeInePath, vProjectedConeInePath)
+    #!!! mplrs_conversion(numThreads,mplrsPath, hProjectedConeInePath, vProjectedConeInePath)
+    mplrs_conversion(numThreads,mplrsPath, hRedundProjectedConeInePath, vProjectedConeInePath)
+    # convertHtoVrepresentation(hRedundProjectedConeInePath, vProjectedConeInePath)
     printDatetime("Finished H-Rep to V-Rep conversion:", datetime.now())
     proCEMs = getRaysFromVrepresentation(vProjectedConeInePath)
+    time_enumerate_projectedcone_end = time.time()
+    logTimeToCSV(logTimesFile, f"Iter {iteration}", "Enumerate projected Cone", time_enumerate_projectedcone_end - time_enumerate_projectedcone_start)
     if verbose:
-        print("\n#########\nResulting proCEMs:\n", proCEMs)
+        print("\n#########\nBefore Redund - proCEMs:\n", proCEMs)
         print("\n#########\nResulting proCEMs-Shape:\n", proCEMs.shape)
+
+    time_redund_procems_start = time.time()
+    vProCEMsPath = os.path.join(outputDir,"proCEMs_V.ine")
+    redundvProCEMsPath = os.path.join(outputDir,"redund_proCEMs_V.ine")
+    convertMatrixToVRepresentation(proCEMs, vProCEMsPath)
+    if proCEMs.shape[0] > 300000:
+        print(f"Error: shape={projectedConeMatrix.shape}")
+        exit(0)
+    redund(numThreads,mplrsPath,vProCEMsPath,redundvProCEMsPath)
+    printDatetime("Finished redund step for proCEMs:", datetime.now())
+    proCEMs = getRaysFromVrepresentation(redundvProCEMsPath)
+    time_redund_procems_end = time.time()
+    logTimeToCSV(logTimesFile, f"Iter {iteration}", "Redund proCEMs", time_redund_procems_end - time_redund_procems_start)
+    if verbose:
+        print("\n#########\nAfter Redund - proCEMs:\n", proCEMs)
+        print("\n#########\nResulting proCEMs-Shape:\n", proCEMs.shape)
+
+    time_calc_efps_start = time.time()
     efps = calculateEFPsFromProCEMs(proCEMs)
+    time_calc_efps_end = time.time()
+    logTimeToCSV(logTimesFile, f"Iter {iteration}", "Calc EFPs", time_calc_efps_end - time_calc_efps_start)
     printDatetime("Finished calculating efps:", datetime.now())
     #if verbose:
     #    print("EFPs:", efps)
@@ -91,6 +274,11 @@ def runMarashiWithPolcoSubsets(stoicMatrix, projectOntoDimensions, outputDir, nu
     printDatetime("Start: ", datetime.now())
     #sortedStoicMatrix = sortStoicMatrix(stoicMatrix, projectOntoDimensions)
     sortedStoicMatrix = stoicMatrix
+    # sortReactions = get_sorted_column_indices_from_array(sortedStoicMatrix, len(originalProjectionReactions))
+    # sortReactions = list(range(len(originalProjectionReactions))) + sortReactions
+    # #print(sortReactions)
+    # sortedStoicMatrix = sortedStoicMatrix[:,sortReactions]
+    np.savetxt(os.path.join(outputDir, 'array.csv'), sortedStoicMatrix, delimiter=',', fmt='%d')
 
     convertMatrixToHRepresentation(sortedStoicMatrix, os.path.join(outputDir, "stoicMatrix.ine"))
     if iteration == 0:
@@ -138,11 +326,12 @@ def runMarashiWithPolcoSubsets(stoicMatrix, projectOntoDimensions, outputDir, nu
         logger.info("Start Double Description:")
     # enumerate rays of W:
     #rayMatrix = doubleDescription(-np.vstack([eliminationMatrix, np.identity(eliminationMatrix.shape[1])]), iqFileIdentity, outputDir, outputFile, stage, numThreads=numThreads)
-    rayMatrix = doubleDescription(np.identity(eliminationMatrix.shape[1]), iqFileIdentity, outputDir, outputFile, stage, eliminationMatrix, eqFile, numThreads=numThreads)
-    #convertEqualitiesAndInequalities2hRep(eliminationMatrix, np.identity(eliminationMatrix.shape[1]), os.path.join(outputDir, "doubleDescription.ine"))
+    #!!! rayMatrix = doubleDescription(np.identity(eliminationMatrix.shape[1]), iqFileIdentity, outputDir, outputFile, stage, eliminationMatrix, eqFile, numThreads=numThreads)
+    convertEqualitiesAndInequalities2hRep(eliminationMatrix, np.identity(eliminationMatrix.shape[1]), os.path.join(outputDir, "doubleDescription.ine"))
+    # convertEqualities2hRep(eliminationMatrix, os.path.join(outputDir, "doubleDescription.ine"))
     #redund(numThreads,mplrsPath,os.path.join(outputDir, "doubleDescription.ine"),os.path.join(outputDir, "outDoubleDescription.ine")) # remove redundancy
     #exit(0)
-    #rayMatrix = doubleDescriptionINE(os.path.join(outputDir, "outDoubleDescription.ine"), outputDir, outputFile, stage, numThreads=numThreads)
+    rayMatrix = doubleDescriptionINE(os.path.join(outputDir, "doubleDescription.ine"), outputDir, outputFile, stage, numThreads=numThreads)
     logger.info(f"Raymatrix - Shape: {rayMatrix.shape}")
     printDatetime("Finished first double description step:", datetime.now())
     # rayMatrix = rayMatrix.T
@@ -153,24 +342,40 @@ def runMarashiWithPolcoSubsets(stoicMatrix, projectOntoDimensions, outputDir, nu
     # print("RayMatrix:\n", rayMatrix)
     
     # projectedConeMatrix = buildProjectedConeMatrix(rayMatrix.transpose(), interestedMatrix)
+    printDatetime("Calculating projected cone matrix:", datetime.now())
     projectedConeMatrix = buildProjectedConeMatrix(rayMatrix, interestedMatrix) # build condition of projected cone
+    printDatetime("Finished calculating projected cone matrix:", datetime.now())
+    #projectedConeMatrix = process_matrix(projectedConeMatrix)
     #if iteration == 0:
     #    projectedConeMatrix *= -1
     logger.info(f"projectedConeMatrix - Shape: {projectedConeMatrix.shape}")
     # projectedConeMatrix = removeRowsWithZeros(projectedConeMatrix)
     ineFile = os.path.join(outputDir, "projectedCone_H.ine")
+    
+    # projectedConeMatrix = normalize_matrix_by_gcd_and_scale(projectedConeMatrix)
+    #projectedConeMatrix = np.array([normalize_matrix_by_gcd_and_scale(row) for row in projectedConeMatrix])    
+    # Apply conditional normalization to each row of the matrix.
+    # projectedConeMatrix = np.array([normalize_row_if_needed(row) for row in projectedConeMatrix], dtype=object
+    # scale_and_round_row_np
+    # projectedConeMatrix = np.array([scale_and_round_row_np(row) for row in projectedConeMatrix], dtype=object)
+    # print(projectedConeMatrix)
+    
     convertMatrixToHRepresentation(projectedConeMatrix, ineFile)
     printDatetime("Finished converting projected Cone Matrix to H-Rep:", datetime.now())
-
+    if projectedConeMatrix.shape[0] > 300000:
+        print(f"Error: shape={projectedConeMatrix.shape}")
+        exit(0)
     #projectedConeMatrix[[2,3],:]= projectedConeMatrix[[3,2],:]
     #projectedConeMatrix = removeRedundancy(projectedConeMatrix)
     if not os.path.exists(os.path.join(outputDir, "temp")):
         os.mkdir(os.path.join(outputDir, "temp"))
-    chunkSize = 10000
+    #chunkSize = 200
     #logger.info(f"Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} with chunkSize {chunkSize}")
-    #redundIterative(numThreads, mplrsPath, ineFile, os.path.join(outputDir, "tempOutprojectedCone_H.ine"), os.path.join(outputDir, "temp"), chunkSize=chunkSize, verbose=True)
+    #redundIterative(numThreads, mplrsPath, ineFile, os.path.join(outputDir, "tempFirstOutprojectedCone_H.ine"), os.path.join(outputDir, "temp"), chunkSize=chunkSize, verbose=True)
+    #chunkSize = 600
+    #redundIterative(numThreads, mplrsPath, os.path.join(outputDir, "tempFirstOutprojectedCone_H.ine"), os.path.join(outputDir, "tempOutprojectedCone_H.ine"), os.path.join(outputDir, "temp"), chunkSize=chunkSize, verbose=True)
     #logger.info(f"End: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    #redund(numThreads,mplrsPath,os.path.join(outputDir, "tempOutprojectedCone_H.ine"),os.path.join(outputDir, "projectedConeMatrix_final_H.ine")) # remove redundancy
+    #redund(numThreads,mplrsPath,os.path.join(outputDir, "tempOutprojectedCone_H.ine"),os.path.join(outputDir, f"{iteration}_projectedConeMatrix_final_H.ine")) # remove redundancy
     redund(numThreads,mplrsPath,ineFile,os.path.join(outputDir, f"{iteration}_projectedConeMatrix_final_H.ine")) # remove redundancy
     printDatetime("Finished redund step:", datetime.now())
 
@@ -197,14 +402,17 @@ def runMarashiWithPolcoSubsets(stoicMatrix, projectOntoDimensions, outputDir, nu
     # if verbose:
     #     print("\n#########\nBefore redund - proCEMs:\n", proCEMs)
     #     print("Shape: ", proCEMs.shape)
-    # convertMatrixToVRepresentation(proCEMs, os.path.join(outputDir, "redund_proCEMs_V.ine"))
-    # redund(numThreads,mplrsPath,os.path.join(outputDir, "redund_proCEMs_V.ine"),os.path.join(outputDir, "outRedundProCEMs_V.ine"))
-    # printDatetime("Finished redund step for proCEMs:", datetime.now())
-    # proCEMs = getRaysFromVrepresentation(os.path.join(outputDir, "outRedundProCEMs_V.ine"))
+    convertMatrixToVRepresentation(proCEMs, os.path.join(outputDir, "redund_proCEMs_V.ine"))
+    if proCEMs.shape[0] > 300000:
+        print(f"Error: shape={proCEMs.shape}")
+        exit(0)
+    redund(numThreads,mplrsPath,os.path.join(outputDir, "redund_proCEMs_V.ine"),os.path.join(outputDir, "outRedundProCEMs_V.ine"))
+    printDatetime("Finished redund step for proCEMs:", datetime.now())
+    proCEMs = getRaysFromVrepresentation(os.path.join(outputDir, "outRedundProCEMs_V.ine"))
     ## proCEMs= proCEMs.T
-    if verbose:
-        print("\n#########\nAfter redund - proCEMs:\n", proCEMs)
-        print("Shape: ", proCEMs.shape)
+    # if verbose:
+    #     print("\n#########\nAfter redund - proCEMs:\n", proCEMs)
+    #     print("Shape: ", proCEMs.shape)
     efps = calculateEFPsFromProCEMs(proCEMs)
     printDatetime("Finished calculating efps:", datetime.now())
     if verbose:
