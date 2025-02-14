@@ -182,12 +182,12 @@ def doubleDescription(iqMatrix: np.array, iqFile: str, outputDir: str, outputFil
         
         logger.info("Equality Matrix:")
         logger.info(eqMatrix)
-        np.savetxt(eqFilePath, eqMatrix, fmt='%.16f', delimiter="\t") # TODO: fmt aendern
+        np.savetxt(eqFilePath, eqMatrix, fmt='%.6f', delimiter="\t") # TODO: fmt aendern
     
     iqFilePath = os.path.join(outputDir, iqFile)
     logger.info("Inequality Matrix:")
     logger.info(iqMatrix)
-    np.savetxt(iqFilePath, iqMatrix, fmt='%.16f', delimiter="\t")
+    np.savetxt(iqFilePath, iqMatrix, fmt='%.6f', delimiter="\t")
     
     if(".zip" not in outputFile):
         outputFile = outputFile + ".zip"

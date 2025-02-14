@@ -686,7 +686,18 @@ if __name__ == '__main__':
                         metavar='PATH',
                         action='store',
                         default='')
-    
+    parser.add_argument('--tool',
+                        help='Path to csv for time stats.',
+                        type=str,
+                        metavar='STR',
+                        action='store',
+                        default='')
+    parser.add_argument('--stepsize',
+                        help='Path to csv for time stats.',
+                        type=str,
+                        metavar='STR',
+                        action='store',
+                        default='')
     
     args = parser.parse_args()
 
@@ -694,6 +705,8 @@ if __name__ == '__main__':
     print(f'Process ID: {os.getpid()}')
     
     ### set names
+    stepSize = int(args.stepsize)
+    tool = args.tool
     sbmlfile = args.file
     core_name = args.model_name
     path_mplrs = args.mplrs
@@ -860,14 +873,14 @@ if __name__ == '__main__':
     print(reactions)
     lenCurrentReactions = len(reactions)
     lenReactionsToDelete = len(remaining_reactions)
-    stepSize = 2
+    # stepSize = 2
     iteration = 0
     while lenCurrentReactions - stepSize > lenOriginalReactions:
         print(f"Iter: {iteration}. Removed reactions: {iteration*stepSize}/{lenReactionsToDelete}")
         lenCurrentReactions -= stepSize
         if lenCurrentReactions < lenOriginalReactions:
             break
-        tempFolder = f"testResults/mplrs_iterative_ecoli_cmayer_jupyter/iter_{iteration}/"
+        tempFolder = f"testResults/measurements/{tool}_ecoli_{n_processes}t_{stepSize}ss/iter_{iteration}/"
         if not os.path.exists(tempFolder):
             os.makedirs(tempFolder)
         sortReactions = get_sorted_column_indices_from_array(inpMatrix, lenOriginalReactions)
@@ -876,22 +889,28 @@ if __name__ == '__main__':
         # print(reversibleList)
         inpMatrix = inpMatrix[:,sortReactions]
         reversibleList = reversibleList[sortReactions]
-        inpMatrix, efps = runMarashiWithMPLRSSubsets(inpMatrix, reactions[:lenCurrentReactions], tempFolder, 20, True, True, iteration=iteration,originalProjectionReactions=originalReactions,logTimesFile=logTimesFile, reversibleList=reversibleList)
+        if tool == "mplrs":
+            inpMatrix, efps = runMarashiWithMPLRSSubsets(inpMatrix, reactions[:lenCurrentReactions], tempFolder, n_processes, True, True, iteration=iteration,originalProjectionReactions=originalReactions,logTimesFile=logTimesFile, reversibleList=reversibleList)
+        else:
+            inpMatrix, efps = runMarashiWithPolcoSubsets(inpMatrix, reactions[:lenCurrentReactions], tempFolder, n_processes, True, True, iteration=iteration,originalProjectionReactions=originalReactions,logTimesFile=logTimesFile, reversibleList=reversibleList)
         reversibleList = reversibleList[list(range(lenCurrentReactions))]
         #inpMatrix = -inpMatrix
         iteration += 1
-        if lenCurrentReactions < 225:
-            stepSize = 2
+        # if lenCurrentReactions < 225:
+            # stepSize = 2
         # if lenCurrentReactions < 65:
         #     stepSize = 5
         # if lenCurrentReactions < 130:
             # stepSize = 2
         # exit()
     #exit(0)
-    tempFolder = f"testResults/mplrs_iterative_ecoli_cmayer_jupyter/iter_{iteration}/"
+    tempFolder = f"testResults/measurements/{tool}_ecoli_{n_processes}t_{stepSize}ss/iter_{iteration}/"
     if not os.path.exists(tempFolder):
         os.makedirs(tempFolder)
-    proCEMs, efps = runMarashiWithMPLRSSubsets(inpMatrix, reactions[:lenOriginalReactions], tempFolder, 20, False, True, iteration=iteration,originalProjectionReactions=originalReactions,logTimesFile=logTimesFile, reversibleList=reversibleList)
+    if "mplrs" in tool:
+        proCEMs, efps = runMarashiWithMPLRSSubsets(inpMatrix, reactions[:lenOriginalReactions], tempFolder, n_processes, False, True, iteration=iteration,originalProjectionReactions=originalReactions,logTimesFile=logTimesFile, reversibleList=reversibleList)
+    else:
+        proCEMs, efps = runMarashiWithPolcoSubsets(inpMatrix, reactions[:lenOriginalReactions], tempFolder, n_processes, False, True, iteration=iteration,originalProjectionReactions=originalReactions,logTimesFile=logTimesFile, reversibleList=reversibleList)
 
     #proCEMs, efps = runMarashiWithPolcoIterative(inpMatrix, inpReactions, "testResults/polco_iterative_ecoli_cmayer_jupyter/", 100, False, True)
     #proCEMs, efps = runMarashiWithPolco(inpMatrix, inpReactions, "testResults/polco_ecoli_cmayer_jupyter/", 100, False, True)
