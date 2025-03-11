@@ -3,14 +3,10 @@ import subprocess
 from zipfile import ZipFile 
 import re
 import os
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
 from projection.logging_config import logger
 from fractions import Fraction
-
-if not os.getenv("POLCO_PATH"):
-    load_dotenv("env") # load env
-    
-POLCO_PATH = os.getenv("POLCO_PATH")
+import sys
 
 def as_fraction(number, approximation=None):
     """
@@ -47,12 +43,16 @@ def as_fraction(number, approximation=None):
     >>> into_fractions(1/1e7)
     '0'
     """
-    if approximation:    
+    if approximation:
         return str(Fraction(number).limit_denominator(int(float(approximation))))
     else:
-        return str(Fraction(number).limit_denominator(int(1e6)))
+        try:
+            return str(Fraction(number).limit_denominator(1e250))
+        except Exception as e:
+            print(number)
+            raise e
 
-def doubleDescriptionINE(ineFile: str, outputDir: str, outputFile: str, stage = "", verbose=True, numThreads=28):
+def doubleDescriptionINE(ineFile: str, outputDir: str, outputFile: str, stage = "", verbose=True, numThreads=28, POLCO_PATH="polco.jar"):
     '''
     - performs polco's double description method on the system specified by the two input matrices: 
         - inequality matrix: ${iqMatrix} [NOT optional]
@@ -84,91 +84,10 @@ def doubleDescriptionINE(ineFile: str, outputDir: str, outputFile: str, stage = 
     rOutPath = os.path.join(outputDir, stage + "_R")
     os.rename(os.path.join(outputDir,"R"), rOutPath) 
     
-    # raysWithOutFractionsFilePath = os.path.join(outputDir, stage + "_RwoFractions")
-    # if os.path.exists(raysWithOutFractionsFilePath):
-    #     os.remove(raysWithOutFractionsFilePath)
-    # raysWithOutFractionsFile = open(raysWithOutFractionsFilePath, "a")
-        
-    # with open(rOutPath, "r") as file: # replace fractions with decimal numbers
-    #     for line in file.readlines():
-    #         results = re.findall(r"(\d+)\/(\d+)", line)
-    #         for firstNumber,secondNumber in results:
-    #             decimalNumber = float(firstNumber) / float(secondNumber) 
-    #             line = line.replace(str(firstNumber) + "/" + str(secondNumber), str(decimalNumber)) # TODO: replace string with regex match
-                
-    #         raysWithOutFractionsFile.write(line)
-    # raysWithOutFractionsFile.close()        
-    # rayMatrix = np.loadtxt(raysWithOutFractionsFilePath)
     rayMatrix = getRaysFromVrepresentationCDD(rOutPath)
-    # rayMatrix = rayMatrix.transpose()
-    if(verbose):
-        logger.info("resulting Rays:")
-        logger.info(rayMatrix)
-    return rayMatrix
-
-def doubleDescriptionSHORT(numThreads=28):
-    '''
-    - performs polco's double description method on the system specified by the two input matrices: 
-        - inequality matrix: ${iqMatrix} [NOT optional]
-        - equality matrix: ${eqMatrix} [optional]
-    - input matrices are automatically converted to a text-file, specified under ${outputDir}/${iqFile} and ${outputDir}/${eqFile}
-    - polcos rayMatrix will be unzipped, fractions are replaced and final matrix is written to ${outputDir}/${outputFile}
-    - ${stage} is used for logging purposes
-    '''    
-    stage = "PROCEM"
-    iqFilePath = "testResults/polco_iterative_ecoli_cmayer_jupyter/iter_113/file.iq"
-    outputFilePath = "testResults/polco_iterative_ecoli_cmayer_jupyter/iter_113/proCEMs_out2.zip"
-    outputDir = "testResults/polco_iterative_ecoli_cmayer_jupyter/fallback"
-    # date = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-    logPath = outputDir + stage + "_polco2.log"
-    # TODO: make polco path relative
-    #cmd = ["java", "-jar", POLCO_PATH, "-kind", "text", "-iq", iqFilePath]
-    # if(eqFile != ""):
-    #     cmd.append("-eq " + eqFilePath)
-
-    # cmd.extend(["-out", "zip", outputFilePath])
-    # cmd = ["java", "-jar", POLCO_PATH, "-kind", "text", "-iq", iqFilePath]
-    cmd = ["java", "-Xms300g", "-Xmx450g", "-jar", POLCO_PATH, "-kind", "text", "-iq", iqFilePath, "-out", "zip", outputFilePath, "-maxthreads", str(110)]
-
-    verbose =True
-    if verbose:
-        print(cmd)
-    if verbose:
-        with open(logPath, 'w') as logFile:
-            subprocess.run(cmd, stdout=logFile)
-    else:
-        subprocess.run(cmd, stdout=subprocess.DEVNULL)
-    
-    with ZipFile(outputFilePath, 'r') as zObject: 
-        zObject.extract("R", path=outputDir) 
-        zObject.close()
-
-    rOutPath = os.path.join(outputDir, stage + "_R")
-    os.rename(os.path.join(outputDir,"R"), rOutPath) 
-    
-    raysWithOutFractionsFilePath = os.path.join(outputDir, stage + "_RwoFractions")
-    if os.path.exists(raysWithOutFractionsFilePath):
-        os.remove(raysWithOutFractionsFilePath)
-    raysWithOutFractionsFile = open(raysWithOutFractionsFilePath, "a")
-        
-    with open(rOutPath, "r") as file: # replace fractions with decimal numbers
-        for line in file.readlines():
-            results = re.findall(r"(\d+)\/(\d+)", line)
-            for firstNumber,secondNumber in results:
-                decimalNumber = float(firstNumber) / float(secondNumber) 
-                line = line.replace(str(firstNumber) + "/" + str(secondNumber), str(decimalNumber)) # TODO: replace string with regex match
-                
-            raysWithOutFractionsFile.write(line)
-    raysWithOutFractionsFile.close()
-    rayMatrix = np.loadtxt(raysWithOutFractionsFilePath)
-    
-    # rayMatrix = rayMatrix.transpose()
-    if(verbose):
-        logger.info("resulting Rays:")
-        logger.info(rayMatrix)
     return rayMatrix
     
-def doubleDescription(iqMatrix: np.array, iqFile: str, outputDir: str, outputFile: str, stage = "", eqMatrix = np.zeros(0), eqFile = "", verbose=True, numThreads=28):
+def doubleDescription(iqMatrix: np.array, iqFile: str, outputDir: str, outputFile: str, stage = "", eqMatrix = np.zeros(0), eqFile = "", verbose=True, numThreads=28, POLCO_PATH="polco.jar"):
     '''
     - performs polco's double description method on the system specified by the two input matrices: 
         - inequality matrix: ${iqMatrix} [NOT optional]

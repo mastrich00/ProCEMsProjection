@@ -2,6 +2,8 @@ import numpy as np
 import copy
 from projection.logging_config import logger
 import datetime
+from fractions import Fraction
+
 def logTimeToCSV(filepath, step, substep, time, date=None):
     if not date:
         date = datetime.datetime.now()
@@ -86,7 +88,6 @@ def buildEliminationMatrix(stoicMatrix: np.matrix, reactions: list, verbose=True
     '''
     returns matrix H according to Marashi paper
     '''
-
     p = len(reactions)
     q = stoicMatrix.shape[1]-p
     print(f"elMatrix: p={p}, q={q}")
@@ -102,13 +103,20 @@ def buildEliminationMatrix(stoicMatrix: np.matrix, reactions: list, verbose=True
         logger.info(eliminationMatrix)
         logger.info(f"Dimensions: {eliminationMatrix.shape}")
     return eliminationMatrix
-        
 
-def buildProjectedConeMatrix(rayMatrix: np.matrix, interestedMatrix: np.matrix, verbose = True):
+def fraction_matmul(A, B):
+    """Perform matrix multiplication while keeping Fraction precision."""
+    return np.array([[sum(a * b for a, b in zip(row, col)) 
+                      for col in zip(*B)] 
+                     for row in A], dtype=object)
+    
+def buildProjectedConeMatrix(rayMatrix, interestedMatrix, verbose = True):
     '''
     multiply R and G (Marashi paper)
     '''
-    projectedConeMatrix = np.matmul(rayMatrix, interestedMatrix)
+    # projectedConeMatrix = np.matmul(rayMatrix.astype(float), interestedMatrix.astype(float))
+    # projectedConeMatrix = float_to_fraction_matrix(projectedConeMatrix)
+    projectedConeMatrix = fraction_matmul(rayMatrix, interestedMatrix)
     if(verbose):
         logger.info("ProjectedConeMatrix:")
         logger.info(projectedConeMatrix)
@@ -124,28 +132,22 @@ def getSupport(vector):
         if abs(entry) > 10**-8:
             support.append(index)
         index += 1
-    return support    
+    return support
 
 def calculateEFPsFromProCEMs(proCEMs: np.matrix, verbose=True):
     '''
     calculates the EFPs from the ProCEMs according to Marashi paper
     '''
-    # print(proCEMs)
     efps = []
     for rowIndex in range(proCEMs.shape[0]):
-        proCEM = proCEMs[rowIndex,:]
-        # print(f"{rowIndex}: {proCEM}")
+        proCEM = proCEMs[rowIndex, :]
         supportProCEM = getSupport(proCEM)
-        # print(supportProCEM)
         Z = copy.deepcopy(supportProCEM)
         for compareRowIndex in range(proCEMs.shape[0]):
             if compareRowIndex == rowIndex:
                 continue
             compareProCEM = proCEMs[compareRowIndex,:]
             compareSupport = getSupport(compareProCEM)
-            # print(Z)
-            # print(compareSupport)
-            # print("")
             if set(compareSupport).issubset(supportProCEM) and compareSupport != supportProCEM:
                 for entry in compareSupport:
                     if entry in Z:
