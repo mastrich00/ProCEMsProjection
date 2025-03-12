@@ -1,6 +1,3 @@
-polcoPath = "../secondDraft/polco.jar"
-mplrsPath = "mplrsV7_2"
-
 ### import statements ###    
 import argparse
 import cobra
@@ -22,10 +19,10 @@ from functools import partial
 import time
 from projection.enumeration import getMatrixFromHrepresentation, convertMatrixToVRepresentation, convertHtoVrepresentation, convertMatrixToHRepresentation, convertEqualities2hRep, as_fraction
 from projection.marashiProjectionHelpers import get_sorted_column_indices_from_array, logTimeToCSV
-from projection.projection import runMarashiWithPolco, runMarashiWithMPLRS, runFELWithPolco, runMarashiWithPolcoIterative, runMarashiWithPolcoSubsets, runMarashiWithMPLRSSubsets
+from projection.projection import runMarashiWithPolcoSubsets, runMarashiWithMPLRSSubsets
 
 
-### functions ###
+### functions mostly from C. Mayer and M. Holzer:
     
 def read_model(input_filename):
     """
@@ -417,11 +414,23 @@ def write_output_header(ex_metabolites, separator=','):
         header += separator
     return header
 
+def parse_fraction(s):
+    # Split the string into numerator and denominator, then compute the float
+    parts = s.split('/')
+    if len(parts) == 1:
+        return float(parts[0])  # Handle non-fraction values (e.g., integers)
+    return float(parts[0]) / float(parts[1])  # Compute division for fractions
 
 def convert_chunk(chunk):
-    """Parse chunk from V-representation and load into np_array."""
-    array = [line.strip().split()[1:] for line in chunk if line.strip().startswith('0')] # takes all lines which start with 0 and writes it splitted as elements into list (first column not taken)
-    return np.array(array, dtype=float) # choose floats instead of integer
+    """Parse chunk from V-representation and load into np_array with fraction-to-float conversion."""
+   
+    # Process lines starting with '0', convert fractions to floats
+    array = [
+        [parse_fraction(elem) for elem in line.strip().split()[1:]]
+        for line in chunk if line.strip().startswith('0')
+    ]
+    
+    return np.array(array, dtype=float)  # Directly convert to float array
 
 
 def merge_V_representation(reaction_pair_index, array, n_reactions):
@@ -549,7 +558,7 @@ if __name__ == '__main__':
     start = time.time()
     
     ### argparse ###
-    parser = argparse.ArgumentParser(description="Python script to calculate ECM's from given metabolic model.\n@author: Christian Mayer, Marcus Holzer, Bianca Buchner", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser = argparse.ArgumentParser(description="Python script to calculate ECM's from given metabolic model.\n@author: Christian Mayer, Marcus Holzer, Bianca Buchner, Martin Stasek", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     # create group for required arguments
     parser_req = parser.add_argument_group('required arguments')
@@ -605,17 +614,23 @@ if __name__ == '__main__':
                         action='store',
                         default=None)
     parser.add_argument('-mp', '--mplrs',
-                        help='Path to mplrs file.',
+                        help='Path to mplrs.',
                         type=str,
                         metavar='FILE',
                         action='store',
                         default='mplrsV7_2')
+    parser.add_argument('---polco',
+                        help='Path to polco.',
+                        type=str,
+                        metavar='FILE',
+                        action='store',
+                        default='polco.jar')
     parser.add_argument('-o', '--outpath',
                         help='Directory, where results shall be saved.',
                         type=str,
                         metavar='PATH',
                         action='store',
-                        default='./')
+                        default='')
     parser.add_argument('-rn', '--result_name',
                         help='File name of result. If this option is not given, name of result file will be outpath + model_name.',
                         type=str,
@@ -706,10 +721,13 @@ if __name__ == '__main__':
     
     ### set names
     stepSize = int(args.stepsize)
+
+    polcoPath = args.polco
+    mplrsPath = args.mplrs
+
     tool = args.tool
     sbmlfile = args.file
     core_name = args.model_name
-    path_mplrs = args.mplrs
     n_processes = args.n_processes
     separator = args.separator
     decimals = args.decimals
@@ -727,6 +745,11 @@ if __name__ == '__main__':
     parallel = args.parallel
     extern = args.extern
     pool_switch = args.pool
+
+    outpath = args.outpath
+    if outpath == '':
+        outpath = f'./testResults/measurements/{tool}_{core_name}_{n_processes}t_{stepSize}ss/'
+    
     logTimesFile = args.csv
     if logTimesFile == "":
         logTimesFile = outpath + core_name + '_times.csv'
@@ -740,19 +763,19 @@ if __name__ == '__main__':
     if pool_switch and not parallel:
         raise Exception('The --pool option can only be performed if --parallel option is enabled.')
 
-    # set temporary directory
-    tmp_dir = args.tmppath + '/'
+    
     # set result directory
-    outpath = args.outpath #'./'
-
+     #'./'
+    tmp_dir = args.outpath + '/' + args.tmppath + '/'
+    
     # test if outpath directory exists
     if not os.path.isdir(outpath):
-        os.mkdir(outpath)
+        os.makedirs(outpath)
         print(f'Created directory {outpath}.')
 
     # test if path for tmp file exists
     if not os.path.isdir(tmp_dir):
-        os.mkdir(tmp_dir)
+        os.makedirs(tmp_dir)
         print(f'Created directory {tmp_dir}.')
 
     # get path, where this file is saved
@@ -820,31 +843,15 @@ if __name__ == '__main__':
         # create stochiometric matrix with splitted reactions
         model = correct_stochiometric_matrix(model)
 
-
         # create ex_reactions with splitted reactions
         ex_reactions = ex_reaction_id_and_index(model)
-        print(ex_reactions)
+        #print(ex_reactions)
         smatrix = cobra.util.array.create_stoichiometric_matrix(model)
-        df = pd.DataFrame(
-            smatrix,
-            index=[met.id for met in model.metabolites],
-            columns=[rxn.id for rxn in model.reactions]
-        )
-        
-        # Save the DataFrame as a CSV file
-        df.to_csv("stoichiometric_matrix_new.csv",header=True, index=True)
-       
-    
-    
+           
     convertEqualities2hRep(smatrix, os.path.join(tmp_dir, core_name+".ine"))
-    redund(n_processes, path_mplrs, tmp_dir, core_name, verbose=verbose)
+    redund(n_processes, mplrsPath, tmp_dir, core_name, verbose=verbose)
     inpMatrix = getMatrixFromHrepresentation(os.path.join(tmp_dir, core_name+"_postredund.ine"))
 
-    # for i, r in enumerate(model.reactions):
-    #     print(f"{i}: {r.id}")
-
-    # for i, r in enumerate(model.metabolites):
-    #     print(f"{i}: {r.id}")
     reversibleList = np.array([], dtype=bool)
     for reaction in model.reactions:
         if reaction.reversibility:
@@ -854,13 +861,12 @@ if __name__ == '__main__':
 
     reactions = [item[1] for item in ex_reactions]
     print(f"Length: {len(reactions)}, InputReactions: {reactions}")
-    # exit()
 
     originalReactions = reactions
     lenOriginalReactions = len(reactions)
     remaining_reactions = [i for i in range(inpMatrix.shape[1]) if i not in reactions]
     reactions = reactions + remaining_reactions
-    inpMatrix = inpMatrix[:, reactions]
+    inpMatrix = -inpMatrix[:, reactions]
     reversibleList = reversibleList[reactions]
     # inpMatrix = -inpMatrix[:, reactions]
     # sortReactions = get_sorted_column_indices_from_array(inpMatrix, lenOriginalReactions)
@@ -870,7 +876,7 @@ if __name__ == '__main__':
     time_initial_setup_end = time.time()
     logTimeToCSV(logTimesFile, "Initial Setup", "Initial Setup", time_initial_setup_end - time_initial_setup_start)
     
-    print(reactions)
+    #print(reactions)
     lenCurrentReactions = len(reactions)
     lenReactionsToDelete = len(remaining_reactions)
     # stepSize = 2
@@ -880,7 +886,7 @@ if __name__ == '__main__':
         lenCurrentReactions -= stepSize
         if lenCurrentReactions < lenOriginalReactions:
             break
-        tempFolder = f"testResults/measurements/{tool}_ecoli_{n_processes}t_{stepSize}ss/iter_{iteration}/"
+        tempFolder = f"{outpath}/iter_{iteration}/"
         if not os.path.exists(tempFolder):
             os.makedirs(tempFolder)
         sortReactions = get_sorted_column_indices_from_array(inpMatrix, lenOriginalReactions)
@@ -890,11 +896,10 @@ if __name__ == '__main__':
         inpMatrix = inpMatrix[:,sortReactions]
         reversibleList = reversibleList[sortReactions]
         if tool == "mplrs":
-            inpMatrix, efps = runMarashiWithMPLRSSubsets(inpMatrix, reactions[:lenCurrentReactions], tempFolder, n_processes, True, True, iteration=iteration,originalProjectionReactions=originalReactions,logTimesFile=logTimesFile, reversibleList=reversibleList)
+            inpMatrix, efps = runMarashiWithMPLRSSubsets(inpMatrix, reactions[:lenCurrentReactions], tempFolder, n_processes, True, True, iteration=iteration,originalProjectionReactions=originalReactions,logTimesFile=logTimesFile, reversibleList=reversibleList, MPLRS_PATH=mplrsPath)
         else:
-            inpMatrix, efps = runMarashiWithPolcoSubsets(inpMatrix, reactions[:lenCurrentReactions], tempFolder, n_processes, True, True, iteration=iteration,originalProjectionReactions=originalReactions,logTimesFile=logTimesFile, reversibleList=reversibleList)
+            inpMatrix, efps = runMarashiWithPolcoSubsets(inpMatrix, reactions[:lenCurrentReactions], tempFolder, n_processes, True, True, iteration=iteration,originalProjectionReactions=originalReactions,logTimesFile=logTimesFile, reversibleList=reversibleList, MPLRS_PATH=mplrsPath, POLCO_PATH=polcoPath)
         reversibleList = reversibleList[list(range(lenCurrentReactions))]
-        #inpMatrix = -inpMatrix
         iteration += 1
         # if lenCurrentReactions < 225:
             # stepSize = 2
@@ -902,22 +907,15 @@ if __name__ == '__main__':
         #     stepSize = 5
         # if lenCurrentReactions < 130:
             # stepSize = 2
-        # exit()
-    #exit(0)
-    tempFolder = f"testResults/measurements/{tool}_ecoli_{n_processes}t_{stepSize}ss/iter_{iteration}/"
+    tempFolder = f"{outpath}/iter_{iteration}/"
     if not os.path.exists(tempFolder):
         os.makedirs(tempFolder)
     if "mplrs" in tool:
-        proCEMs, efps = runMarashiWithMPLRSSubsets(inpMatrix, reactions[:lenOriginalReactions], tempFolder, n_processes, False, True, iteration=iteration,originalProjectionReactions=originalReactions,logTimesFile=logTimesFile, reversibleList=reversibleList)
+        proCEMs, efps = runMarashiWithMPLRSSubsets(inpMatrix, reactions[:lenOriginalReactions], tempFolder, n_processes, False, True, iteration=iteration,originalProjectionReactions=originalReactions,logTimesFile=logTimesFile, reversibleList=reversibleList, MPLRS_PATH=mplrsPath)
     else:
-        proCEMs, efps = runMarashiWithPolcoSubsets(inpMatrix, reactions[:lenOriginalReactions], tempFolder, n_processes, False, True, iteration=iteration,originalProjectionReactions=originalReactions,logTimesFile=logTimesFile, reversibleList=reversibleList)
+        proCEMs, efps = runMarashiWithPolcoSubsets(inpMatrix, reactions[:lenOriginalReactions], tempFolder, n_processes, False, True, iteration=iteration,originalProjectionReactions=originalReactions,logTimesFile=logTimesFile, reversibleList=reversibleList, MPLRS_PATH=mplrsPath, POLCO_PATH=polcoPath)
 
-    #proCEMs, efps = runMarashiWithPolcoIterative(inpMatrix, inpReactions, "testResults/polco_iterative_ecoli_cmayer_jupyter/", 100, False, True)
-    #proCEMs, efps = runMarashiWithPolco(inpMatrix, inpReactions, "testResults/polco_ecoli_cmayer_jupyter/", 100, False, True)
-    #proCEMs, efps = runMarashiWithMPLRS(inpMatrix, inpReactions, "testResults/mplrs_ecoli_cmayer_jupyter/", mplrsPath, 100, False, True)
-    # proCEMs, efps = runFELWithPolco(inpMatrix, inpDims, "~/secondDraft/testResults/fel/", mplrsPath)
-    print(f"proCEMS: {len(proCEMs)}")
-    print(f"efps: {len(efps)}")
+    print(f"Number of proCEMs: {len(proCEMs)}")
 
     time_postprocessing_start = time.time()
 
@@ -1041,7 +1039,7 @@ if __name__ == '__main__':
         ECM_count = ECM_count_process.stdout
         ECM_count = int(ECM_count.split()[0]) -1
     time_postprocessing_end = time.time()
-    logTimeToCSV(logTimesFile, f"Iter {iteration}", "Postprocessing proCEMs", time_postprocessing_end - time_postprocessing_start)
+    logTimeToCSV(logTimesFile, f"Enum. ProCEMs", "Postprocessing proCEMs", time_postprocessing_end - time_postprocessing_start)
 
     time_end = time.time()
     print(f"Runtime: {time_end - time_start} seconds")

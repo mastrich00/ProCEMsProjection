@@ -22,7 +22,7 @@ parser.add_argument('--tool', choices=['mplrs', 'polco'], default='polco',
                     help='Tool to use for computation (default: polco)')
 parser.add_argument('--stepsize', type=int, default=5,
                     help='Step size parameter (default: 5)')
-parser.add_argument('--threads', type=int, default=120,
+parser.add_argument('-n', type=int, default=120,
                     help='Number of threads to use (default: 120)')
 parser.add_argument('--core', default='excel',
                     help='Core name identifier for output files (default: excel)')
@@ -40,7 +40,7 @@ args = parser.parse_args()
 
 tool = args.tool
 stepSize = args.stepsize
-numThreads = args.threads
+numThreads = args.n
 start = time.time()
 core_name = "/" + args.core
 outPath = f"{args.outdir}/{tool}_{args.core}_{numThreads}t_{stepSize}ss"
