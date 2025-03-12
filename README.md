@@ -43,6 +43,8 @@ Implementation of metabolic network projection method based on [Marashi, David a
 
 ## Usage
 
+The code automatically produces a csv with time stamps for each step.
+
 ### General Syntax
 For the A. thaliana Plastid Excel provided by Marashi:
 ```sh
